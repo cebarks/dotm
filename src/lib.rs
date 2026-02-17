@@ -8,5 +8,6 @@ pub mod orchestrator;
 pub mod resolver;
 pub mod scanner;
 pub mod state;
+pub mod status;
 pub mod template;
 pub mod vars;

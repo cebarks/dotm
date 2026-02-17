@@ -30,7 +30,17 @@ enum Commands {
     /// Remove all managed symlinks and copies
     Undeploy,
     /// Show deployment status
-    Status,
+    Status {
+        /// Show all files, not just problems
+        #[arg(short, long)]
+        verbose: bool,
+        /// One-line summary for shell integration (no output when clean)
+        #[arg(short, long)]
+        short: bool,
+        /// Filter to a specific package
+        #[arg(short, long)]
+        package: Option<String>,
+    },
     /// Show diffs for files modified since last deploy
     Diff {
         /// Only show diff for a specific file path
@@ -115,54 +125,56 @@ fn main() -> anyhow::Result<()> {
             let removed = state.undeploy()?;
             println!("Removed {removed} managed files.");
         }
-        Commands::Status => {
+        Commands::Status { verbose, short, package } => {
             let state_dir = dotm_state_dir();
             let state = dotm::state::DeployState::load(&state_dir)?;
             let entries = state.entries();
 
             if entries.is_empty() {
-                println!("No files currently managed by dotm.");
+                if !short {
+                    println!("No files currently managed by dotm.");
+                }
                 return Ok(());
             }
 
-            let mut _ok_count = 0usize;
-            let mut modified_count = 0usize;
-            let mut missing_count = 0usize;
+            let statuses: Vec<dotm::state::FileStatus> = entries
+                .iter()
+                .map(|e| state.check_entry_status(e))
+                .collect();
 
-            println!("Managed files:");
-            for entry in entries {
-                let status = state.check_entry_status(entry);
-                let label = match status {
-                    dotm::state::FileStatus::Ok => {
-                        _ok_count += 1;
-                        "ok"
-                    }
-                    dotm::state::FileStatus::Modified => {
-                        modified_count += 1;
-                        "MODIFIED"
-                    }
-                    dotm::state::FileStatus::Missing => {
-                        missing_count += 1;
-                        "MISSING"
-                    }
-                };
-                println!("  [{:8}] {}", label, entry.target.display());
+            let mut groups = dotm::status::group_by_package(entries, &statuses);
+
+            if let Some(ref pkg_name) = package {
+                groups.retain(|g| g.name == *pkg_name);
+                if groups.is_empty() {
+                    eprintln!("error: no deployed package named '{pkg_name}'");
+                    std::process::exit(1);
+                }
             }
 
-            println!();
-            println!(
-                "{} managed, {} modified, {} missing.",
-                entries.len(),
-                modified_count,
-                missing_count
-            );
+            let total: usize = groups.iter().map(|g| g.total).sum();
+            let modified: usize = groups.iter().map(|g| g.modified).sum();
+            let missing: usize = groups.iter().map(|g| g.missing).sum();
 
-            if modified_count > 0 || missing_count > 0 {
-                if modified_count > 0 {
-                    println!(
-                        "Run 'dotm diff' to see changes, 'dotm adopt' to review and accept."
-                    );
+            let color = dotm::status::use_color();
+
+            if short {
+                dotm::status::print_short(total, modified, missing, color);
+            } else {
+                if verbose || package.is_some() {
+                    dotm::status::print_status_verbose(&groups, color);
+                } else {
+                    dotm::status::print_status_default(&groups, color);
                 }
+                println!();
+                dotm::status::print_footer(total, modified, missing, color);
+
+                if modified > 0 {
+                    println!("Run 'dotm diff' to see changes, 'dotm adopt' to review and accept.");
+                }
+            }
+
+            if modified > 0 || missing > 0 {
                 std::process::exit(1);
             }
         }
