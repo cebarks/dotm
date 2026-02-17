@@ -2,6 +2,7 @@ pub mod adopt;
 pub mod config;
 pub mod deployer;
 pub mod diff;
+pub mod git;
 pub mod hash;
 pub mod loader;
 pub mod orchestrator;

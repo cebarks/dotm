@@ -59,6 +59,28 @@ enum Commands {
         /// Package name
         name: String,
     },
+    /// Commit all changes in the dotfiles repository
+    Commit {
+        /// Commit message (auto-generated if not provided)
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+    /// Push dotfiles repository to remote
+    Push,
+    /// Pull dotfiles repository from remote
+    Pull,
+    /// Pull, deploy, and optionally push in one step
+    Sync {
+        /// Target host (defaults to system hostname)
+        #[arg(long)]
+        host: Option<String>,
+        /// Skip pushing after deploy
+        #[arg(long)]
+        no_push: bool,
+        /// Overwrite existing unmanaged files
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -157,6 +179,22 @@ fn main() -> anyhow::Result<()> {
             let missing: usize = groups.iter().map(|g| g.missing).sum();
 
             let color = dotm::status::use_color();
+
+            // Git summary (optional — only when in a git repo)
+            if let Some(git_repo) = dotm::git::GitRepo::open(&cli.dir) {
+                match git_repo.summary() {
+                    Ok(summary) => {
+                        if !short {
+                            dotm::status::print_git_summary(&summary, color);
+                        }
+                    }
+                    Err(e) => {
+                        if !short {
+                            eprintln!("warning: failed to read git status: {e}");
+                        }
+                    }
+                }
+            }
 
             if short {
                 dotm::status::print_short(total, modified, missing, color);
@@ -355,6 +393,167 @@ fn main() -> anyhow::Result<()> {
             std::fs::create_dir_all(&pkg_dir)?;
             println!("Created package: {}", pkg_dir.display());
             println!("Add files mirroring their home directory structure.");
+        }
+        Commands::Commit { message } => {
+            let git_repo = dotm::git::GitRepo::open(&cli.dir).ok_or_else(|| {
+                anyhow::anyhow!("dotfiles directory is not a git repository")
+            })?;
+
+            let msg = match message {
+                Some(m) => m,
+                None => {
+                    let dirty = git_repo.dirty_files()?;
+                    if dirty.is_empty() {
+                        anyhow::bail!("nothing to commit — working tree is clean");
+                    }
+                    let mut body = format!("dotm: update {} files\n\n", dirty.len());
+                    for f in &dirty {
+                        body.push_str(&format!("  {}\n", f.path));
+                    }
+                    body
+                }
+            };
+
+            git_repo.commit_all(&msg)?;
+            println!("Committed changes.");
+        }
+        Commands::Push => {
+            let git_repo = dotm::git::GitRepo::open(&cli.dir).ok_or_else(|| {
+                anyhow::anyhow!("dotfiles directory is not a git repository")
+            })?;
+
+            match git_repo.push()? {
+                dotm::git::PushResult::Success => println!("Pushed successfully."),
+                dotm::git::PushResult::NoRemote => {
+                    eprintln!("error: no remote configured");
+                    std::process::exit(1);
+                }
+                dotm::git::PushResult::Rejected(msg) => {
+                    eprintln!("Push rejected:\n{msg}");
+                    std::process::exit(1);
+                }
+                dotm::git::PushResult::Error(msg) => {
+                    eprintln!("Push failed:\n{msg}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::Pull => {
+            let git_repo = dotm::git::GitRepo::open(&cli.dir).ok_or_else(|| {
+                anyhow::anyhow!("dotfiles directory is not a git repository")
+            })?;
+
+            match git_repo.pull()? {
+                dotm::git::PullResult::Success => println!("Pulled successfully."),
+                dotm::git::PullResult::AlreadyUpToDate => println!("Already up to date."),
+                dotm::git::PullResult::NoRemote => {
+                    eprintln!("error: no remote configured");
+                    std::process::exit(1);
+                }
+                dotm::git::PullResult::Conflicts(files) => {
+                    eprintln!("Pull resulted in conflicts:");
+                    for f in &files {
+                        eprintln!("  ! {f}");
+                    }
+                    eprintln!(
+                        "\nResolve conflicts in the dotfiles repo, then run 'dotm deploy'."
+                    );
+                    std::process::exit(1);
+                }
+                dotm::git::PullResult::Error(msg) => {
+                    eprintln!("Pull failed:\n{msg}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::Sync {
+            host,
+            no_push,
+            force,
+        } => {
+            let git_repo = dotm::git::GitRepo::open(&cli.dir).ok_or_else(|| {
+                anyhow::anyhow!("dotfiles directory is not a git repository")
+            })?;
+
+            // Step 1: Pull
+            println!("Pulling from remote...");
+            match git_repo.pull()? {
+                dotm::git::PullResult::Success => println!("Pulled successfully."),
+                dotm::git::PullResult::AlreadyUpToDate => println!("Already up to date."),
+                dotm::git::PullResult::NoRemote => {
+                    eprintln!("warning: no remote configured, skipping pull");
+                }
+                dotm::git::PullResult::Conflicts(files) => {
+                    eprintln!("Pull resulted in merge conflicts:");
+                    for f in &files {
+                        eprintln!("  ! {f}");
+                    }
+                    eprintln!(
+                        "\nSync aborted. Resolve conflicts in the dotfiles repo, then retry."
+                    );
+                    std::process::exit(1);
+                }
+                dotm::git::PullResult::Error(msg) => {
+                    eprintln!("Pull failed:\n{msg}");
+                    eprintln!("Sync aborted.");
+                    std::process::exit(1);
+                }
+            }
+
+            // Step 2: Deploy
+            println!("Deploying...");
+            let hostname = match host {
+                Some(h) => h,
+                None => hostname::get()
+                    .map(|h| h.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| {
+                        eprintln!("error: could not detect hostname, use --host to specify");
+                        std::process::exit(1);
+                    }),
+            };
+
+            let target_dir = dirs::home_dir().unwrap_or_else(|| {
+                eprintln!("error: could not determine home directory");
+                std::process::exit(1);
+            });
+
+            let state_dir = dotm_state_dir();
+            let mut orch = Orchestrator::new(&cli.dir, &target_dir)?.with_state_dir(&state_dir);
+            let report = orch.deploy(&hostname, false, force)?;
+
+            if !report.created.is_empty() {
+                println!("Created {} files.", report.created.len());
+            }
+            if !report.updated.is_empty() {
+                println!("Updated {} files.", report.updated.len());
+            }
+            if !report.conflicts.is_empty() {
+                eprintln!("Deploy conflicts ({}):", report.conflicts.len());
+                for (path, msg) in &report.conflicts {
+                    eprintln!("  ! {} — {}", path.display(), msg);
+                }
+            }
+
+            // Step 3: Push (unless --no-push)
+            if !no_push {
+                println!("Pushing to remote...");
+                match git_repo.push()? {
+                    dotm::git::PushResult::Success => println!("Pushed successfully."),
+                    dotm::git::PushResult::NoRemote => {
+                        eprintln!("warning: no remote configured, skipping push");
+                    }
+                    dotm::git::PushResult::Rejected(msg) => {
+                        eprintln!("Push rejected:\n{msg}");
+                        std::process::exit(1);
+                    }
+                    dotm::git::PushResult::Error(msg) => {
+                        eprintln!("Push failed:\n{msg}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+
+            println!("Sync complete.");
         }
     }
 
