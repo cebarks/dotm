@@ -2,6 +2,7 @@ use crate::deployer::{self, DeployResult};
 use crate::loader::ConfigLoader;
 use crate::resolver;
 use crate::scanner;
+use crate::state::DeployState;
 use crate::template;
 use crate::vars;
 use anyhow::{Context, Result};
@@ -12,6 +13,7 @@ use toml::Value;
 pub struct Orchestrator {
     loader: ConfigLoader,
     target_dir: PathBuf,
+    state_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Default)]
@@ -29,11 +31,22 @@ impl Orchestrator {
         Ok(Self {
             loader,
             target_dir: target_dir.to_path_buf(),
+            state_dir: None,
         })
+    }
+
+    pub fn with_state_dir(mut self, state_dir: &Path) -> Self {
+        self.state_dir = Some(state_dir.to_path_buf());
+        self
     }
 
     pub fn deploy(&mut self, hostname: &str, dry_run: bool, force: bool) -> Result<DeployReport> {
         let mut report = DeployReport::default();
+        let mut state = self
+            .state_dir
+            .as_ref()
+            .map(|d| DeployState::new(d))
+            .unwrap_or_default();
 
         // 1. Load host config
         let host = self
@@ -106,8 +119,20 @@ impl Orchestrator {
 
                 let target_path = pkg_target.join(&action.target_rel_path);
                 match result {
-                    DeployResult::Created => report.created.push(target_path),
-                    DeployResult::Updated => report.updated.push(target_path),
+                    DeployResult::Created | DeployResult::Updated => {
+                        if action.is_copy || action.is_template {
+                            state.record_copy(target_path.clone());
+                        } else {
+                            let abs_source = std::fs::canonicalize(&action.source)
+                                .unwrap_or_else(|_| action.source.clone());
+                            state.record_symlink(target_path.clone(), abs_source);
+                        }
+                        if matches!(result, DeployResult::Created) {
+                            report.created.push(target_path);
+                        } else {
+                            report.updated.push(target_path);
+                        }
+                    }
                     DeployResult::Unchanged => report.unchanged.push(target_path),
                     DeployResult::Conflict(msg) => report.conflicts.push((target_path, msg)),
                     DeployResult::DryRun => report.dry_run_actions.push(target_path),
@@ -115,15 +140,19 @@ impl Orchestrator {
             }
         }
 
+        if !dry_run && self.state_dir.is_some() {
+            state.save()?;
+        }
+
         Ok(report)
     }
 }
 
 fn shellexpand_tilde(path: &str) -> String {
-    if path.starts_with("~/") || path == "~" {
-        if let Ok(home) = std::env::var("HOME") {
-            return path.replacen('~', &home, 1);
-        }
+    if (path.starts_with("~/") || path == "~")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return path.replacen('~', &home, 1);
     }
     path.to_string()
 }
