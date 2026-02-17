@@ -5,6 +5,8 @@ edition = "2024"
 description = "Dotfile manager with composable roles, templates, and host-specific overrides"
 license = "MIT"
 repository = "https://github.com/cebarks/dotm"
+keywords = ["dotfiles", "configuration", "symlink", "template", "stow"]
+categories = ["command-line-utilities", "config"]
 
 [dependencies]
 anyhow = "1"
