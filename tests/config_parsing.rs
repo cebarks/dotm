@@ -113,3 +113,34 @@ packages = ["zsh", "ssh"]
     assert_eq!(config.packages, vec!["zsh", "ssh"]);
     assert!(config.vars.is_empty());
 }
+
+#[test]
+fn parse_package_with_strategy_and_permissions() {
+    let toml_str = r#"
+[dotm]
+target = "~"
+
+[packages.system]
+description = "System configs"
+target = "/"
+strategy = "copy"
+
+[packages.bin]
+description = "Scripts"
+
+[packages.bin.permissions]
+"bin/myscript" = "755"
+"bin/helper" = "700"
+"#;
+
+    let config: RootConfig = toml::from_str(toml_str).unwrap();
+
+    let system = &config.packages["system"];
+    assert_eq!(system.strategy, dotm::config::DeployStrategy::Copy);
+
+    let bin = &config.packages["bin"];
+    assert_eq!(bin.strategy, dotm::config::DeployStrategy::Stage);
+    let perms = &bin.permissions;
+    assert_eq!(perms.get("bin/myscript").unwrap(), "755");
+    assert_eq!(perms.get("bin/helper").unwrap(), "700");
+}
