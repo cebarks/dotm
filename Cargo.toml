@@ -2,8 +2,11 @@
 name = "dotm"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Dotfile manager with composable roles, templates, and host-specific overrides"
-license = "MIT"
+license = "AGPL-3.0-only"
+authors = ["Anten Skrabec <cebarks@gmail.com>"]
+readme = "README.md"
 repository = "https://github.com/cebarks/dotm"
 keywords = ["dotfiles", "configuration", "symlink", "template", "stow"]
 categories = ["command-line-utilities", "config"]
