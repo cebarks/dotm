@@ -94,8 +94,8 @@ display.resolution = "3840x2160"
 A host config selects which roles to apply and can override variables. Host configs live in `hosts/<hostname>.toml`:
 
 ```toml
-# hosts/relativity.toml
-hostname = "relativity"
+# hosts/workstation.toml
+hostname = "workstation"
 roles = ["desktop", "gaming", "dev"]
 
 [vars]
@@ -111,8 +111,8 @@ Variable precedence: **host vars > role vars** (last role listed wins among role
 ~/dotfiles/
 ├── dotm.toml                    # root config: package declarations
 ├── hosts/
-│   ├── relativity.toml          # workstation
-│   └── mars.toml                # server
+│   ├── workstation.toml          # workstation
+│   └── dev-server.toml                # server
 ├── roles/
 │   ├── desktop.toml
 │   ├── dev.toml
@@ -120,7 +120,7 @@ Variable precedence: **host vars > role vars** (last role listed wins among role
 └── packages/
     ├── shell/
     │   ├── .bashrc              # plain file → symlinked
-    │   ├── .bashrc##host.mars   # host override → copied
+    │   ├── .bashrc##host.dev-server   # host override → copied
     │   └── .bashrc##role.dev    # role override → copied
     ├── editor/
     │   └── .config/nvim/
@@ -183,7 +183,7 @@ Commands:
 
 ```bash
 dotm deploy                    # deploy for current hostname
-dotm deploy --host mars        # deploy for a specific host
+dotm deploy --host dev-server        # deploy for a specific host
 dotm deploy --dry-run          # show what would be done
 dotm deploy --force            # overwrite existing unmanaged files
 ```
@@ -228,4 +228,4 @@ dotm init mypackage            # create packages/mypackage/
 
 ## License
 
-MIT
+GNU AGPLv3 
