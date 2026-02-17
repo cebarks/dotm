@@ -1,3 +1,4 @@
+use crate::git::GitSummary;
 use crate::state::{DeployEntry, FileStatus};
 use crossterm::style::Stylize;
 use std::collections::BTreeMap;
@@ -287,6 +288,44 @@ pub fn print_footer(total: usize, modified: usize, missing: usize, color: bool) 
     }
 }
 
+pub fn render_git_summary(summary: &GitSummary) -> String {
+    let mut parts = Vec::new();
+
+    let branch = summary.branch.as_deref().unwrap_or("(detached)");
+    parts.push(format!("git: {branch}"));
+
+    let mut dirty_parts = Vec::new();
+    if summary.modified_count > 0 {
+        dirty_parts.push(format!("{} modified", summary.modified_count));
+    }
+    if summary.untracked_count > 0 {
+        dirty_parts.push(format!("{} untracked", summary.untracked_count));
+    }
+    if dirty_parts.is_empty() {
+        dirty_parts.push("clean".to_string());
+    }
+    parts.push(dirty_parts.join(", "));
+
+    if let Some((ahead, behind)) = summary.ahead_behind {
+        parts.push(format!("{ahead} ahead, {behind} behind"));
+    }
+
+    parts.join(" | ")
+}
+
+pub fn print_git_summary(summary: &GitSummary, color: bool) {
+    let text = render_git_summary(summary);
+    if color {
+        if summary.dirty_count > 0 {
+            println!("{}", text.yellow());
+        } else {
+            println!("{}", text.green());
+        }
+    } else {
+        println!("{text}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,5 +443,35 @@ mod tests {
         assert!(output.contains("10 managed"));
         assert!(output.contains("2 modified"));
         assert!(output.contains("1 missing"));
+    }
+
+    #[test]
+    fn render_git_summary_clean() {
+        let summary = crate::git::GitSummary {
+            branch: Some("main".to_string()),
+            dirty_count: 0,
+            untracked_count: 0,
+            modified_count: 0,
+            ahead_behind: None,
+        };
+        let output = render_git_summary(&summary);
+        assert!(output.contains("git: main"));
+        assert!(output.contains("clean"));
+    }
+
+    #[test]
+    fn render_git_summary_dirty_with_remote() {
+        let summary = crate::git::GitSummary {
+            branch: Some("feature/test".to_string()),
+            dirty_count: 3,
+            untracked_count: 1,
+            modified_count: 2,
+            ahead_behind: Some((3, 0)),
+        };
+        let output = render_git_summary(&summary);
+        assert!(output.contains("git: feature/test"));
+        assert!(output.contains("2 modified"));
+        assert!(output.contains("1 untracked"));
+        assert!(output.contains("3 ahead, 0 behind"));
     }
 }

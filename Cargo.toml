@@ -17,6 +17,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tera = "1"
 crossterm = "0.28"
+gix = { version = "0.76", default-features = true, features = ["revision"] }
 sha2 = "0.10"
 similar = "2"
 toml = "1"
