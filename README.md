@@ -226,6 +226,10 @@ dotm init mypackage            # create packages/mypackage/
 
 *yadm templates require a separate `yadm alt` step.
 
+## Disclaimer
+
+Claude Code (Opus 4.6) was used for parts of the development of this tool, including some implementation, testing and documentation.
+
 ## License
 
 GNU AGPLv3 
