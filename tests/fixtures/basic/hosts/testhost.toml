@@ -1,0 +1,5 @@
+hostname = "testhost"
+roles = ["desktop", "dev"]
+
+[vars]
+editor.theme = "gruvbox"

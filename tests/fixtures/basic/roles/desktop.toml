@@ -1,0 +1,4 @@
+packages = ["shell"]
+
+[vars]
+shell.prompt = "fancy"

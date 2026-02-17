@@ -1,0 +1,10 @@
+[dotm]
+target = "~"
+
+[packages.shell]
+description = "Shell configuration"
+
+[packages.editor]
+description = "Editor configuration"
+depends = ["shell"]
+suggests = ["theme"]

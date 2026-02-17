@@ -1,0 +1,5 @@
+hostname = "myhost"
+roles = ["desktop"]
+
+[vars]
+app.color = "blue"

@@ -1,0 +1,5 @@
+[dotm]
+target = "~"
+
+[packages.configs]
+description = "Test configs"
