@@ -1,6 +1,15 @@
+use crate::hash;
+use crate::scanner::EntryKind;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum FileStatus {
+    Ok,
+    Modified,
+    Missing,
+}
 
 const STATE_FILE: &str = "dotm-state.json";
 
@@ -8,14 +17,17 @@ const STATE_FILE: &str = "dotm-state.json";
 pub struct DeployState {
     #[serde(skip)]
     state_dir: PathBuf,
-    symlinks: Vec<SymlinkEntry>,
-    copies: Vec<PathBuf>,
+    entries: Vec<DeployEntry>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct SymlinkEntry {
+pub struct DeployEntry {
     pub target: PathBuf,
+    pub staged: PathBuf,
     pub source: PathBuf,
+    pub content_hash: String,
+    pub kind: EntryKind,
+    pub package: String,
 }
 
 impl DeployState {
@@ -49,40 +61,74 @@ impl DeployState {
         Ok(())
     }
 
-    pub fn record_symlink(&mut self, target: PathBuf, source: PathBuf) {
-        self.symlinks.push(SymlinkEntry { target, source });
+    pub fn record(&mut self, entry: DeployEntry) {
+        self.entries.push(entry);
     }
 
-    pub fn record_copy(&mut self, target: PathBuf) {
-        self.copies.push(target);
+    pub fn entries(&self) -> &[DeployEntry] {
+        &self.entries
     }
 
-    pub fn symlinks(&self) -> &[SymlinkEntry] {
-        &self.symlinks
+    pub fn check_entry_status(&self, entry: &DeployEntry) -> FileStatus {
+        if !entry.target.exists() && !entry.target.is_symlink() {
+            return FileStatus::Missing;
+        }
+        if entry.staged.exists() {
+            if let Ok(current_hash) = hash::hash_file(&entry.staged)
+                && current_hash != entry.content_hash {
+                    return FileStatus::Modified;
+                }
+        } else {
+            return FileStatus::Missing;
+        }
+        FileStatus::Ok
     }
 
-    pub fn copies(&self) -> &[PathBuf] {
-        &self.copies
+    pub fn originals_dir(&self) -> PathBuf {
+        self.state_dir.join("originals")
+    }
+
+    pub fn store_original(&self, content_hash: &str, content: &[u8]) -> Result<()> {
+        let dir = self.originals_dir();
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("failed to create originals directory: {}", dir.display()))?;
+        let path = dir.join(content_hash);
+        if !path.exists() {
+            std::fs::write(&path, content)
+                .with_context(|| format!("failed to store original: {}", path.display()))?;
+        }
+        Ok(())
+    }
+
+    pub fn load_original(&self, content_hash: &str) -> Result<Vec<u8>> {
+        let path = self.originals_dir().join(content_hash);
+        std::fs::read(&path)
+            .with_context(|| format!("failed to load original content: {}", path.display()))
     }
 
     /// Remove all managed files and return a count of removed files.
     pub fn undeploy(&self) -> Result<usize> {
         let mut removed = 0;
 
-        for entry in &self.symlinks {
-            if entry.target.is_symlink() {
+        for entry in &self.entries {
+            if entry.target.is_symlink() || entry.target.exists() {
                 std::fs::remove_file(&entry.target)
-                    .with_context(|| format!("failed to remove symlink: {}", entry.target.display()))?;
+                    .with_context(|| format!("failed to remove target: {}", entry.target.display()))?;
+                cleanup_empty_parents(&entry.target);
                 removed += 1;
+            }
+
+            if entry.staged.exists() {
+                std::fs::remove_file(&entry.staged)
+                    .with_context(|| format!("failed to remove staged file: {}", entry.staged.display()))?;
+                cleanup_empty_parents(&entry.staged);
             }
         }
 
-        for path in &self.copies {
-            if path.exists() {
-                std::fs::remove_file(path)
-                    .with_context(|| format!("failed to remove copy: {}", path.display()))?;
-                removed += 1;
-            }
+        // Clean up originals directory
+        let originals = self.originals_dir();
+        if originals.is_dir() {
+            let _ = std::fs::remove_dir_all(&originals);
         }
 
         // Remove the state file itself
@@ -92,5 +138,25 @@ impl DeployState {
         }
 
         Ok(removed)
+    }
+}
+
+fn cleanup_empty_parents(path: &Path) {
+    let mut current = path.parent();
+    while let Some(parent) = current {
+        if parent == Path::new("") || parent == Path::new("/") {
+            break;
+        }
+        match std::fs::read_dir(parent) {
+            Ok(mut entries) => {
+                if entries.next().is_none() {
+                    let _ = std::fs::remove_dir(parent);
+                    current = parent.parent();
+                } else {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
     }
 }

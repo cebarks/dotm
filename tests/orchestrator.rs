@@ -17,8 +17,14 @@ fn full_deploy_basic_fixture() {
     );
     assert!(!report.created.is_empty(), "expected some files to be created");
 
-    // Check that .bashrc was symlinked (shell package, pulled in by desktop role)
+    // Check that .bashrc was symlinked through staging
     assert!(target_dir.path().join(".bashrc").is_symlink());
+    let bashrc_link = std::fs::read_link(target_dir.path().join(".bashrc")).unwrap();
+    assert!(
+        bashrc_link.to_str().unwrap().contains(".staged"),
+        "symlink should point into .staged/, got: {}",
+        bashrc_link.display()
+    );
     // Check that editor config was deployed (editor package, pulled in by dev role, depends on shell)
     assert!(target_dir.path().join(".config/nvim/init.lua").is_symlink());
 }

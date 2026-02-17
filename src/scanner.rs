@@ -2,6 +2,17 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// What kind of entry a file action represents, determining how it gets deployed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum EntryKind {
+    /// Plain base file — deployed as a symlink
+    Base,
+    /// Host or role override — deployed as a copy
+    Override,
+    /// Tera template — rendered and written as a file
+    Template,
+}
+
 /// Describes what to do with a single file during deployment.
 #[derive(Debug)]
 pub struct FileAction {
@@ -9,10 +20,8 @@ pub struct FileAction {
     pub source: PathBuf,
     /// The relative path where this file should be deployed (relative to target dir)
     pub target_rel_path: PathBuf,
-    /// Whether to copy (true) or symlink (false)
-    pub is_copy: bool,
-    /// Whether this file is a Tera template that needs rendering
-    pub is_template: bool,
+    /// What kind of entry this is (base, override, or template)
+    pub kind: EntryKind,
 }
 
 /// Scan a package directory and resolve overrides for the given host and roles.
@@ -100,8 +109,7 @@ fn resolve_variant(
         return FileAction {
             source: source.clone(),
             target_rel_path: target_path.to_path_buf(),
-            is_copy: true,
-            is_template: false,
+            kind: EntryKind::Override,
         };
     }
 
@@ -115,8 +123,7 @@ fn resolve_variant(
             return FileAction {
                 source: source.clone(),
                 target_rel_path: target_path.to_path_buf(),
-                is_copy: true,
-                is_template: false,
+                kind: EntryKind::Override,
             };
         }
     }
@@ -129,8 +136,7 @@ fn resolve_variant(
         return FileAction {
             source: source.clone(),
             target_rel_path: target_path.to_path_buf(),
-            is_copy: true,
-            is_template: true,
+            kind: EntryKind::Template,
         };
     }
 
@@ -146,7 +152,6 @@ fn resolve_variant(
     FileAction {
         source: source.clone(),
         target_rel_path: target_path.to_path_buf(),
-        is_copy: false,
-        is_template: false,
+        kind: EntryKind::Base,
     }
 }

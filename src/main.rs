@@ -31,6 +31,13 @@ enum Commands {
     Undeploy,
     /// Show deployment status
     Status,
+    /// Show diffs for files modified since last deploy
+    Diff {
+        /// Only show diff for a specific file path
+        path: Option<String>,
+    },
+    /// Interactively adopt changes made to deployed files back into source
+    Adopt,
     /// Validate configuration
     Check {
         /// Warn about undeployed suggested packages
@@ -111,32 +118,136 @@ fn main() -> anyhow::Result<()> {
         Commands::Status => {
             let state_dir = dotm_state_dir();
             let state = dotm::state::DeployState::load(&state_dir)?;
+            let entries = state.entries();
 
-            let symlinks = state.symlinks();
-            let copies = state.copies();
-
-            if symlinks.is_empty() && copies.is_empty() {
+            if entries.is_empty() {
                 println!("No files currently managed by dotm.");
                 return Ok(());
             }
 
+            let mut _ok_count = 0usize;
+            let mut modified_count = 0usize;
+            let mut missing_count = 0usize;
+
             println!("Managed files:");
-            for entry in symlinks {
-                let status = if entry.target.is_symlink() {
-                    "ok"
-                } else {
-                    "MISSING"
+            for entry in entries {
+                let status = state.check_entry_status(entry);
+                let label = match status {
+                    dotm::state::FileStatus::Ok => {
+                        _ok_count += 1;
+                        "ok"
+                    }
+                    dotm::state::FileStatus::Modified => {
+                        modified_count += 1;
+                        "MODIFIED"
+                    }
+                    dotm::state::FileStatus::Missing => {
+                        missing_count += 1;
+                        "MISSING"
+                    }
                 };
-                println!(
-                    "  [{}] {} -> {}",
-                    status,
-                    entry.target.display(),
-                    entry.source.display()
+                println!("  [{:8}] {}", label, entry.target.display());
+            }
+
+            println!();
+            println!(
+                "{} managed, {} modified, {} missing.",
+                entries.len(),
+                modified_count,
+                missing_count
+            );
+
+            if modified_count > 0 || missing_count > 0 {
+                if modified_count > 0 {
+                    println!(
+                        "Run 'dotm diff' to see changes, 'dotm adopt' to review and accept."
+                    );
+                }
+                std::process::exit(1);
+            }
+        }
+        Commands::Diff { path } => {
+            let state_dir = dotm_state_dir();
+            let state = dotm::state::DeployState::load(&state_dir)?;
+            let mut found_diffs = false;
+
+            for entry in state.entries() {
+                if let Some(ref filter) = path
+                    && !entry.target.to_str().unwrap_or("").contains(filter)
+                {
+                    continue;
+                }
+
+                let status = state.check_entry_status(entry);
+                if status != dotm::state::FileStatus::Modified {
+                    continue;
+                }
+
+                found_diffs = true;
+
+                let current = std::fs::read_to_string(&entry.staged).unwrap_or_default();
+                let original = state
+                    .load_original(&entry.content_hash)
+                    .map(|b| String::from_utf8_lossy(&b).to_string())
+                    .unwrap_or_else(|_| "(original not available)".to_string());
+
+                let label_a = format!("deployed: {}", entry.target.display());
+                let label_b = format!("current:  {}", entry.target.display());
+                print!(
+                    "{}",
+                    dotm::diff::format_unified_diff(&original, &current, &label_a, &label_b)
                 );
             }
-            for path in copies {
-                let status = if path.exists() { "ok" } else { "MISSING" };
-                println!("  [{}] {} (copy)", status, path.display());
+
+            if !found_diffs {
+                println!("No modified files.");
+            }
+        }
+        Commands::Adopt => {
+            let state_dir = dotm_state_dir();
+            let state = dotm::state::DeployState::load(&state_dir)?;
+            let mut adopted_count = 0;
+
+            for entry in state.entries() {
+                let status = state.check_entry_status(entry);
+                if status != dotm::state::FileStatus::Modified {
+                    continue;
+                }
+
+                if entry.kind == dotm::scanner::EntryKind::Template {
+                    eprintln!(
+                        "Skipping {} (template — changes must be manually applied to the .tera source)",
+                        entry.target.display()
+                    );
+                    continue;
+                }
+
+                let current = std::fs::read_to_string(&entry.staged)?;
+                let original = state
+                    .load_original(&entry.content_hash)
+                    .map(|b| String::from_utf8_lossy(&b).to_string())?;
+
+                let file_label = entry.target.to_str().unwrap_or("unknown");
+                match dotm::adopt::interactive_adopt(file_label, &original, &current)? {
+                    Some(patched) => {
+                        std::fs::write(&entry.source, &patched)?;
+                        std::fs::write(&entry.staged, &patched)?;
+                        adopted_count += 1;
+                        println!("Adopted changes to {}", entry.source.display());
+                    }
+                    None => {
+                        println!("Skipped {}", entry.target.display());
+                    }
+                }
+            }
+
+            if adopted_count > 0 {
+                println!(
+                    "\nAdopted changes to {} file(s). Run 'dotm deploy' to re-sync state.",
+                    adopted_count
+                );
+            } else {
+                println!("No changes adopted.");
             }
         }
         Commands::Check { warn_suggestions } => {

@@ -21,6 +21,14 @@ fn default_packages_dir() -> String {
     "packages".to_string()
 }
 
+#[derive(Debug, Deserialize, PartialEq, Eq, Clone, Copy, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DeployStrategy {
+    #[default]
+    Stage,
+    Copy,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PackageConfig {
     pub description: Option<String>,
@@ -29,6 +37,10 @@ pub struct PackageConfig {
     #[serde(default)]
     pub suggests: Vec<String>,
     pub target: Option<String>,
+    #[serde(default)]
+    pub strategy: DeployStrategy,
+    #[serde(default)]
+    pub permissions: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]

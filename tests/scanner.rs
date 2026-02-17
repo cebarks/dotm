@@ -15,7 +15,7 @@ fn scan_resolves_host_override_over_base() {
         .to_str()
         .unwrap()
         .ends_with("app.conf##host.myhost"));
-    assert!(app_conf.is_copy, "overrides should be copied, not symlinked");
+    assert_eq!(app_conf.kind, dotm::scanner::EntryKind::Override, "overrides should be copied, not symlinked");
 }
 
 #[test]
@@ -32,7 +32,7 @@ fn scan_resolves_role_override_when_no_host_override() {
         .to_str()
         .unwrap()
         .ends_with("app.conf##role.desktop"));
-    assert!(app_conf.is_copy);
+    assert_eq!(app_conf.kind, dotm::scanner::EntryKind::Override);
 }
 
 #[test]
@@ -46,7 +46,7 @@ fn scan_uses_base_when_no_overrides_match() {
         .unwrap();
     assert!(app_conf.source.to_str().unwrap().ends_with("app.conf"));
     assert!(!app_conf.source.to_str().unwrap().contains("##"));
-    assert!(!app_conf.is_copy, "plain files should be symlinked");
+    assert_eq!(app_conf.kind, dotm::scanner::EntryKind::Base, "plain files should be symlinked");
 }
 
 #[test]
@@ -58,8 +58,7 @@ fn scan_plain_file_is_symlinked() {
         .iter()
         .find(|a| a.target_rel_path.to_str() == Some(".profile"))
         .unwrap();
-    assert!(!profile.is_copy);
-    assert!(!profile.is_template);
+    assert_eq!(profile.kind, dotm::scanner::EntryKind::Base);
 }
 
 #[test]
@@ -71,8 +70,7 @@ fn scan_template_is_detected() {
         .iter()
         .find(|a| a.target_rel_path.to_str() == Some(".config/templated.conf"))
         .unwrap();
-    assert!(tmpl.is_template);
-    assert!(tmpl.is_copy, "templates are always copied");
+    assert_eq!(tmpl.kind, dotm::scanner::EntryKind::Template);
     assert!(tmpl.source.to_str().unwrap().ends_with(".tera"));
 }
 
@@ -100,6 +98,5 @@ fn scan_theme_conf_has_no_override() {
         .iter()
         .find(|a| a.target_rel_path.to_str() == Some(".config/theme.conf"))
         .unwrap();
-    assert!(!theme.is_copy);
-    assert!(!theme.is_template);
+    assert_eq!(theme.kind, dotm::scanner::EntryKind::Base);
 }
