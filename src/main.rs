@@ -82,6 +82,20 @@ enum Commands {
         /// Package name
         name: String,
     },
+    /// Add existing files to a package
+    Add {
+        /// Package to add files to
+        package: String,
+        /// Files to add
+        #[arg(required = true)]
+        files: Vec<std::path::PathBuf>,
+        /// Overwrite if file already exists in package
+        #[arg(long)]
+        force: bool,
+        /// Operate on system packages
+        #[arg(long)]
+        system: bool,
+    },
     /// List available packages, roles, or hosts
     List {
         #[command(subcommand)]
@@ -579,6 +593,75 @@ fn main() -> anyhow::Result<()> {
             std::fs::create_dir_all(&pkg_dir)?;
             println!("Created package: {}", pkg_dir.display());
             println!("Add files mirroring their home directory structure.");
+        }
+        Commands::Add {
+            package,
+            files,
+            force,
+            system: _,
+        } => {
+            let loader = dotm::loader::ConfigLoader::new(&cli.dir)?;
+
+            if !loader.root().packages.contains_key(&package) {
+                eprintln!("error: unknown package '{package}'");
+                std::process::exit(1);
+            }
+
+            let pkg_config = &loader.root().packages[&package];
+            let target_dir = if let Some(ref target) = pkg_config.target {
+                PathBuf::from(dotm::orchestrator::expand_path(
+                    target,
+                    Some(&format!("package '{package}'")),
+                )?)
+            } else {
+                dirs::home_dir().unwrap_or_else(|| {
+                    eprintln!("error: could not determine home directory");
+                    std::process::exit(1);
+                })
+            };
+
+            let packages_dir = loader.packages_dir();
+            let pkg_dir = packages_dir.join(&package);
+
+            let mut moved = 0;
+            for file in &files {
+                let abs_file = std::fs::canonicalize(file).unwrap_or_else(|_| {
+                    eprintln!("error: file not found: {}", file.display());
+                    std::process::exit(1);
+                });
+
+                let rel_path = abs_file.strip_prefix(&target_dir).unwrap_or_else(|_| {
+                    eprintln!(
+                        "error: {} is not under the package target directory ({})",
+                        abs_file.display(),
+                        target_dir.display()
+                    );
+                    std::process::exit(1);
+                });
+
+                let dest = pkg_dir.join(rel_path);
+
+                if dest.exists() && !force {
+                    eprintln!(
+                        "error: {} already exists in package (use --force to overwrite)",
+                        dest.display()
+                    );
+                    std::process::exit(1);
+                }
+
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+
+                std::fs::rename(&abs_file, &dest)?;
+                println!("  {} → {}", abs_file.display(), dest.display());
+                moved += 1;
+            }
+
+            if moved > 0 {
+                println!("Added {} file(s) to package '{package}'.", moved);
+                println!("Run 'dotm deploy' to create symlinks.");
+            }
         }
         Commands::List { what } => {
             let loader = dotm::loader::ConfigLoader::new(&cli.dir)?;
