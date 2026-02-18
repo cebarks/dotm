@@ -2,7 +2,7 @@
 name = "dotm"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.87"
 description = "Dotfile manager with composable roles, templates, and host-specific overrides"
 license = "AGPL-3.0-only"
 authors = ["Anten Skrabec <cebarks@gmail.com>"]
