@@ -26,6 +26,7 @@ fn make_root(packages: Vec<(&str, Vec<&str>, Vec<&str>)>) -> RootConfig {
         dotm: DotmSettings {
             target: "~".to_string(),
             packages_dir: "packages".to_string(),
+            auto_prune: false,
         },
         packages: pkg_map,
     }

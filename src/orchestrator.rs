@@ -30,6 +30,8 @@ pub struct DeployReport {
     pub unchanged: Vec<PathBuf>,
     pub conflicts: Vec<(PathBuf, String)>,
     pub dry_run_actions: Vec<PathBuf>,
+    pub orphaned: Vec<PathBuf>,
+    pub pruned: Vec<PathBuf>,
 }
 
 struct PendingAction {
@@ -499,6 +501,32 @@ impl Orchestrator {
                             report.dry_run_actions.push(target_path);
                         }
                         _ => {}
+                    }
+                }
+            }
+        }
+
+        // Phase 4.5: Detect orphaned files
+        if self.state_dir.is_some() {
+            let new_targets: std::collections::HashSet<PathBuf> = pending
+                .iter()
+                .map(|p| p.pkg_target.join(&p.action.target_rel_path))
+                .collect();
+
+            for old_entry in existing_state.entries() {
+                if !new_targets.contains(&old_entry.target) {
+                    report.orphaned.push(old_entry.target.clone());
+
+                    if !dry_run && self.loader.root().dotm.auto_prune {
+                        if old_entry.target.is_symlink() || old_entry.target.exists() {
+                            let _ = std::fs::remove_file(&old_entry.target);
+                            crate::state::cleanup_empty_parents(&old_entry.target);
+                        }
+                        if old_entry.staged != old_entry.target && old_entry.staged.exists() {
+                            let _ = std::fs::remove_file(&old_entry.staged);
+                            crate::state::cleanup_empty_parents(&old_entry.staged);
+                        }
+                        report.pruned.push(old_entry.target.clone());
                     }
                 }
             }

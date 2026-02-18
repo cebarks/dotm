@@ -104,6 +104,18 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Remove files that are no longer managed by any package
+    Prune {
+        /// Target host (defaults to system hostname)
+        #[arg(long)]
+        host: Option<String>,
+        /// Show what would be pruned without removing
+        #[arg(long)]
+        dry_run: bool,
+        /// Operate on system packages
+        #[arg(long)]
+        system: bool,
+    },
     /// Pull, deploy, and optionally push in one step
     Sync {
         /// Target host (defaults to system hostname)
@@ -188,6 +200,17 @@ fn main() -> anyhow::Result<()> {
                     eprintln!("Conflicts ({}):", report.conflicts.len());
                     for (path, msg) in &report.conflicts {
                         eprintln!("  ! {} — {}", path.display(), msg);
+                    }
+                }
+                if !report.orphaned.is_empty() {
+                    if report.pruned.is_empty() {
+                        eprintln!("Warning: {} orphaned files (no longer managed):", report.orphaned.len());
+                        for path in &report.orphaned {
+                            eprintln!("  ? {}", path.display());
+                        }
+                        eprintln!("Run 'dotm prune' to clean up, or set auto_prune = true in dotm.toml.");
+                    } else {
+                        println!("Pruned {} orphaned files.", report.pruned.len());
                     }
                 }
             }
@@ -597,6 +620,90 @@ fn main() -> anyhow::Result<()> {
                     eprintln!("Pull failed:\n{msg}");
                     std::process::exit(1);
                 }
+            }
+        }
+        Commands::Prune {
+            host,
+            dry_run,
+            system,
+        } => {
+            let hostname = match host {
+                Some(h) => h,
+                None => hostname::get()
+                    .map(|h| h.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| {
+                        eprintln!("error: could not detect hostname, use --host to specify");
+                        std::process::exit(1);
+                    }),
+            };
+
+            let target_dir = dirs::home_dir().unwrap_or_else(|| {
+                eprintln!("error: could not determine home directory");
+                std::process::exit(1);
+            });
+
+            let state_dir = if system {
+                check_system_privileges();
+                system_state_dir()
+            } else {
+                dotm_state_dir()
+            };
+
+            // Load existing state to find what's currently managed
+            let existing_state = dotm::state::DeployState::load_locked(&state_dir)?;
+            if existing_state.entries().is_empty() {
+                println!("No files currently managed by dotm.");
+                return Ok(());
+            }
+
+            // Run a deploy scan to determine what *would* be deployed now
+            let mut orch = Orchestrator::new(&cli.dir, &target_dir)?
+                .with_state_dir(&state_dir)
+                .with_system_mode(system);
+            let report = orch.deploy(&hostname, true, false)?; // dry run to get the target set
+
+            let new_targets: std::collections::HashSet<std::path::PathBuf> = report
+                .dry_run_actions
+                .iter()
+                .cloned()
+                .collect();
+
+            let mut pruned = 0;
+            for entry in existing_state.entries() {
+                if !new_targets.contains(&entry.target) {
+                    if dry_run {
+                        println!("  ? {}", entry.target.display());
+                    } else {
+                        if entry.target.is_symlink() || entry.target.exists() {
+                            let _ = std::fs::remove_file(&entry.target);
+                            dotm::state::cleanup_empty_parents(&entry.target);
+                        }
+                        if entry.staged != entry.target && entry.staged.exists() {
+                            let _ = std::fs::remove_file(&entry.staged);
+                            dotm::state::cleanup_empty_parents(&entry.staged);
+                        }
+                        println!("  - {}", entry.target.display());
+                    }
+                    pruned += 1;
+                }
+            }
+
+            if dry_run {
+                if pruned > 0 {
+                    println!("Dry run — would prune {pruned} orphaned files.");
+                } else {
+                    println!("No orphaned files to prune.");
+                }
+            } else if pruned > 0 {
+                // Re-deploy to update state without orphans
+                drop(existing_state); // release lock
+                let mut orch2 = Orchestrator::new(&cli.dir, &target_dir)?
+                    .with_state_dir(&state_dir)
+                    .with_system_mode(system);
+                orch2.deploy(&hostname, false, true)?;
+                println!("Pruned {pruned} orphaned files.");
+            } else {
+                println!("No orphaned files to prune.");
             }
         }
         Commands::Sync {

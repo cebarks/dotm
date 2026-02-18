@@ -415,7 +415,7 @@ impl DeployState {
     }
 }
 
-fn cleanup_empty_parents(path: &Path) {
+pub fn cleanup_empty_parents(path: &Path) {
     let mut current = path.parent();
     while let Some(parent) = current {
         if parent == Path::new("") || parent == Path::new("/") {

@@ -15,6 +15,8 @@ pub struct DotmSettings {
     pub target: String,
     #[serde(default = "default_packages_dir")]
     pub packages_dir: String,
+    #[serde(default)]
+    pub auto_prune: bool,
 }
 
 fn default_packages_dir() -> String {
