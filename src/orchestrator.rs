@@ -230,8 +230,56 @@ impl Orchestrator {
             .map(|e| (e.staged.clone(), e.content_hash.as_str()))
             .collect();
 
-        // Phase 4: Deploy each action
+        // Phase 4: Deploy each action (with per-package hooks)
+        let mut current_pkg: Option<String> = None;
+        let mut skip_pkg: Option<String> = None;
+
         for p in &pending {
+            // Run pre_deploy hook when entering a new package
+            if current_pkg.as_deref() != Some(&p.pkg_name) {
+                // Run post_deploy for the previous package
+                if let Some(ref prev_pkg) = current_pkg {
+                    if !dry_run {
+                        if let Some(pkg_config) = self.loader.root().packages.get(prev_pkg) {
+                            if let Some(ref cmd) = pkg_config.post_deploy {
+                                let pkg_target = pending.iter()
+                                    .find(|pp| pp.pkg_name == *prev_pkg)
+                                    .map(|pp| &pp.pkg_target)
+                                    .unwrap();
+                                if let Err(e) = crate::hooks::run_hook(cmd, pkg_target, prev_pkg, "deploy") {
+                                    eprintln!("warning: {e}");
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Run pre_deploy for the new package
+                if !dry_run {
+                    if let Some(pkg_config) = self.loader.root().packages.get(&p.pkg_name) {
+                        if let Some(ref cmd) = pkg_config.pre_deploy {
+                            if let Err(e) = crate::hooks::run_hook(cmd, &p.pkg_target, &p.pkg_name, "deploy") {
+                                eprintln!("warning: pre_deploy hook failed, skipping package '{}': {e}", p.pkg_name);
+                                skip_pkg = Some(p.pkg_name.clone());
+                                current_pkg = Some(p.pkg_name.clone());
+                                continue;
+                            }
+                        }
+                    }
+                }
+                skip_pkg = None;
+                current_pkg = Some(p.pkg_name.clone());
+            }
+
+            // Skip all files for a package whose pre_deploy hook failed
+            if skip_pkg.as_deref() == Some(&p.pkg_name) {
+                report.conflicts.push((
+                    p.pkg_target.join(&p.action.target_rel_path),
+                    "skipped: pre_deploy hook failed".to_string(),
+                ));
+                continue;
+            }
+
             let target_path = p.pkg_target.join(&p.action.target_rel_path);
 
             match p.strategy {
@@ -319,19 +367,7 @@ impl Orchestrator {
                                 }
                             } else {
                                 metadata::resolve_metadata(
-                                    &crate::config::PackageConfig {
-                                        description: None,
-                                        depends: vec![],
-                                        suggests: vec![],
-                                        target: None,
-                                        strategy: None,
-                                        system: false,
-                                        owner: None,
-                                        group: None,
-                                        permissions: Default::default(),
-                                        ownership: Default::default(),
-                                        preserve: Default::default(),
-                                    },
+                                    &crate::config::PackageConfig::default(),
                                     "",
                                 )
                             };
@@ -452,19 +488,7 @@ impl Orchestrator {
                                 }
                             } else {
                                 metadata::resolve_metadata(
-                                    &crate::config::PackageConfig {
-                                        description: None,
-                                        depends: vec![],
-                                        suggests: vec![],
-                                        target: None,
-                                        strategy: None,
-                                        system: false,
-                                        owner: None,
-                                        group: None,
-                                        permissions: Default::default(),
-                                        ownership: Default::default(),
-                                        preserve: Default::default(),
-                                    },
+                                    &crate::config::PackageConfig::default(),
                                     "",
                                 )
                             };
@@ -501,6 +525,23 @@ impl Orchestrator {
                             report.dry_run_actions.push(target_path);
                         }
                         _ => {}
+                    }
+                }
+            }
+        }
+
+        // Run post_deploy for the final package
+        if let Some(ref last_pkg) = current_pkg {
+            if !dry_run && skip_pkg.as_deref() != Some(last_pkg) {
+                if let Some(pkg_config) = self.loader.root().packages.get(last_pkg) {
+                    if let Some(ref cmd) = pkg_config.post_deploy {
+                        let pkg_target = pending.iter()
+                            .find(|pp| pp.pkg_name == *last_pkg)
+                            .map(|pp| &pp.pkg_target)
+                            .unwrap();
+                        if let Err(e) = crate::hooks::run_hook(cmd, pkg_target, last_pkg, "deploy") {
+                            eprintln!("warning: {e}");
+                        }
                     }
                 }
             }

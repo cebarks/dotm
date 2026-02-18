@@ -49,6 +49,10 @@ pub struct PackageConfig {
     pub ownership: HashMap<String, String>,
     #[serde(default)]
     pub preserve: HashMap<String, Vec<String>>,
+    pub pre_deploy: Option<String>,
+    pub post_deploy: Option<String>,
+    pub pre_undeploy: Option<String>,
+    pub post_undeploy: Option<String>,
 }
 
 pub fn validate_system_packages(root: &RootConfig) -> Vec<String> {
