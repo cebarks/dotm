@@ -15,6 +15,8 @@ pub struct DotmSettings {
     pub target: String,
     #[serde(default = "default_packages_dir")]
     pub packages_dir: String,
+    #[serde(default)]
+    pub auto_prune: bool,
 }
 
 fn default_packages_dir() -> String {
@@ -47,6 +49,10 @@ pub struct PackageConfig {
     pub ownership: HashMap<String, String>,
     #[serde(default)]
     pub preserve: HashMap<String, Vec<String>>,
+    pub pre_deploy: Option<String>,
+    pub post_deploy: Option<String>,
+    pub pre_undeploy: Option<String>,
+    pub post_undeploy: Option<String>,
 }
 
 pub fn validate_system_packages(root: &RootConfig) -> Vec<String> {

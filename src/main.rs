@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use dotm::orchestrator::Orchestrator;
 use std::path::PathBuf;
 
@@ -29,12 +29,18 @@ enum Commands {
         /// Operate on system packages (requires root)
         #[arg(long)]
         system: bool,
+        /// Deploy only this package (and its dependencies)
+        #[arg(short, long)]
+        package: Option<String>,
     },
     /// Remove all managed symlinks and copies
     Undeploy {
         /// Operate on system packages (requires root)
         #[arg(long)]
         system: bool,
+        /// Undeploy only this package
+        #[arg(short, long)]
+        package: Option<String>,
     },
     /// Show deployment status
     Status {
@@ -76,6 +82,25 @@ enum Commands {
         /// Package name
         name: String,
     },
+    /// Add existing files to a package
+    Add {
+        /// Package to add files to
+        package: String,
+        /// Files to add
+        #[arg(required = true)]
+        files: Vec<std::path::PathBuf>,
+        /// Overwrite if file already exists in package
+        #[arg(long)]
+        force: bool,
+        /// Operate on system packages
+        #[arg(long)]
+        system: bool,
+    },
+    /// List available packages, roles, or hosts
+    List {
+        #[command(subcommand)]
+        what: ListWhat,
+    },
     /// Commit all changes in the dotfiles repository
     Commit {
         /// Commit message (auto-generated if not provided)
@@ -86,6 +111,11 @@ enum Commands {
     Push,
     /// Pull dotfiles repository from remote
     Pull,
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        shell: clap_complete::Shell,
+    },
     /// Restore files to their pre-dotm state
     Restore {
         /// Restore only system packages
@@ -97,6 +127,18 @@ enum Commands {
         /// Show what would be done without making changes
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Remove files that are no longer managed by any package
+    Prune {
+        /// Target host (defaults to system hostname)
+        #[arg(long)]
+        host: Option<String>,
+        /// Show what would be pruned without removing
+        #[arg(long)]
+        dry_run: bool,
+        /// Operate on system packages
+        #[arg(long)]
+        system: bool,
     },
     /// Pull, deploy, and optionally push in one step
     Sync {
@@ -115,6 +157,31 @@ enum Commands {
     },
 }
 
+#[derive(clap::Subcommand)]
+enum ListWhat {
+    /// List packages
+    Packages {
+        /// Show details (depends, strategy, etc.)
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// List roles
+    Roles {
+        /// Show included packages
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// List hosts
+    Hosts {
+        /// Show assigned roles
+        #[arg(short, long)]
+        verbose: bool,
+        /// Show host → role → package tree
+        #[arg(long)]
+        tree: bool,
+    },
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
@@ -124,6 +191,7 @@ fn main() -> anyhow::Result<()> {
             dry_run,
             force,
             system,
+            package,
         } => {
             let hostname = match host {
                 Some(h) => h,
@@ -149,7 +217,8 @@ fn main() -> anyhow::Result<()> {
 
             let mut orch = Orchestrator::new(&cli.dir, &target_dir)?
                 .with_state_dir(&state_dir)
-                .with_system_mode(system);
+                .with_system_mode(system)
+                .with_package_filter(package);
 
             if system && !orch.loader().root().packages.values().any(|p| p.system) {
                 println!("no system packages configured");
@@ -182,6 +251,17 @@ fn main() -> anyhow::Result<()> {
                         eprintln!("  ! {} — {}", path.display(), msg);
                     }
                 }
+                if !report.orphaned.is_empty() {
+                    if report.pruned.is_empty() {
+                        eprintln!("Warning: {} orphaned files (no longer managed):", report.orphaned.len());
+                        for path in &report.orphaned {
+                            eprintln!("  ? {}", path.display());
+                        }
+                        eprintln!("Run 'dotm prune' to clean up, or set auto_prune = true in dotm.toml.");
+                    } else {
+                        println!("Pruned {} orphaned files.", report.pruned.len());
+                    }
+                }
             }
 
             if !report.conflicts.is_empty() {
@@ -195,7 +275,7 @@ fn main() -> anyhow::Result<()> {
             } else {
                 dotm_state_dir()
             };
-            let state = dotm::state::DeployState::load(&state_dir)?;
+            let state = dotm::state::DeployState::load_locked(&state_dir)?;
 
             if state.entries().is_empty() {
                 println!("No files currently managed by dotm.");
@@ -223,15 +303,19 @@ fn main() -> anyhow::Result<()> {
                 println!("Restored {} files.", restored);
             }
         }
-        Commands::Undeploy { system } => {
+        Commands::Undeploy { system, package } => {
             let state_dir = if system {
                 check_system_privileges();
                 system_state_dir()
             } else {
                 dotm_state_dir()
             };
-            let state = dotm::state::DeployState::load(&state_dir)?;
-            let removed = state.undeploy()?;
+            let mut state = dotm::state::DeployState::load_locked(&state_dir)?;
+            let removed = if let Some(ref pkg) = package {
+                state.undeploy_package(pkg)?
+            } else {
+                state.undeploy()?
+            };
             println!("Removed {removed} managed files.");
         }
         Commands::Status { verbose, short, package, system } => {
@@ -357,47 +441,63 @@ fn main() -> anyhow::Result<()> {
             } else {
                 dotm_state_dir()
             };
-            let state = dotm::state::DeployState::load(&state_dir)?;
+            let mut state = dotm::state::DeployState::load_locked(&state_dir)?;
             let mut adopted_count = 0;
+            let num_entries = state.entries().len();
 
-            for entry in state.entries() {
-                let status = state.check_entry_status(entry);
-                if !status.is_modified() {
+            for idx in 0..num_entries {
+                let (is_modified, is_template, staged, source, target, content_hash) = {
+                    let entry = &state.entries()[idx];
+                    let status = state.check_entry_status(entry);
+                    (
+                        status.is_modified(),
+                        entry.kind == dotm::scanner::EntryKind::Template,
+                        entry.staged.clone(),
+                        entry.source.clone(),
+                        entry.target.clone(),
+                        entry.content_hash.clone(),
+                    )
+                };
+
+                if !is_modified {
                     continue;
                 }
 
-                if entry.kind == dotm::scanner::EntryKind::Template {
+                if is_template {
                     eprintln!(
                         "Skipping {} (template — changes must be manually applied to the .tera source)",
-                        entry.target.display()
+                        target.display()
                     );
                     continue;
                 }
 
-                let current = std::fs::read_to_string(&entry.staged)?;
+                let current = std::fs::read_to_string(&staged)?;
                 let original = state
-                    .load_deployed(&entry.content_hash)
+                    .load_deployed(&content_hash)
                     .map(|b| String::from_utf8_lossy(&b).to_string())?;
 
-                let file_label = entry.target.to_str().unwrap_or("unknown");
+                let file_label = target.to_str().unwrap_or("unknown");
                 match dotm::adopt::interactive_adopt(file_label, &original, &current)? {
                     Some(patched) => {
-                        std::fs::write(&entry.source, &patched)?;
-                        std::fs::write(&entry.staged, &patched)?;
+                        std::fs::write(&source, &patched)?;
+                        std::fs::write(&staged, &patched)?;
+
+                        let new_hash = dotm::hash::hash_content(patched.as_bytes());
+                        state.store_deployed(&new_hash, patched.as_bytes())?;
+                        state.update_entry_hash(idx, new_hash);
+
                         adopted_count += 1;
-                        println!("Adopted changes to {}", entry.source.display());
+                        println!("Adopted changes to {}", source.display());
                     }
                     None => {
-                        println!("Skipped {}", entry.target.display());
+                        println!("Skipped {}", target.display());
                     }
                 }
             }
 
             if adopted_count > 0 {
-                println!(
-                    "\nAdopted changes to {} file(s). Run 'dotm deploy' to re-sync state.",
-                    adopted_count
-                );
+                state.save()?;
+                println!("\nAdopted changes to {} file(s).", adopted_count);
             } else {
                 println!("No changes adopted.");
             }
@@ -499,6 +599,93 @@ fn main() -> anyhow::Result<()> {
             println!("Created package: {}", pkg_dir.display());
             println!("Add files mirroring their home directory structure.");
         }
+        Commands::Add {
+            package,
+            files,
+            force,
+            system: _,
+        } => {
+            let loader = dotm::loader::ConfigLoader::new(&cli.dir)?;
+
+            if !loader.root().packages.contains_key(&package) {
+                eprintln!("error: unknown package '{package}'");
+                std::process::exit(1);
+            }
+
+            let pkg_config = &loader.root().packages[&package];
+            let target_dir = if let Some(ref target) = pkg_config.target {
+                PathBuf::from(dotm::orchestrator::expand_path(
+                    target,
+                    Some(&format!("package '{package}'")),
+                )?)
+            } else {
+                dirs::home_dir().unwrap_or_else(|| {
+                    eprintln!("error: could not determine home directory");
+                    std::process::exit(1);
+                })
+            };
+
+            let packages_dir = loader.packages_dir();
+            let pkg_dir = packages_dir.join(&package);
+
+            let mut moved = 0;
+            for file in &files {
+                let abs_file = std::fs::canonicalize(file).unwrap_or_else(|_| {
+                    eprintln!("error: file not found: {}", file.display());
+                    std::process::exit(1);
+                });
+
+                let rel_path = abs_file.strip_prefix(&target_dir).unwrap_or_else(|_| {
+                    eprintln!(
+                        "error: {} is not under the package target directory ({})",
+                        abs_file.display(),
+                        target_dir.display()
+                    );
+                    std::process::exit(1);
+                });
+
+                let dest = pkg_dir.join(rel_path);
+
+                if dest.exists() && !force {
+                    eprintln!(
+                        "error: {} already exists in package (use --force to overwrite)",
+                        dest.display()
+                    );
+                    std::process::exit(1);
+                }
+
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+
+                std::fs::rename(&abs_file, &dest)?;
+                println!("  {} → {}", abs_file.display(), dest.display());
+                moved += 1;
+            }
+
+            if moved > 0 {
+                println!("Added {} file(s) to package '{package}'.", moved);
+                println!("Run 'dotm deploy' to create symlinks.");
+            }
+        }
+        Commands::List { what } => {
+            let loader = dotm::loader::ConfigLoader::new(&cli.dir)?;
+            match what {
+                ListWhat::Packages { verbose } => {
+                    print!("{}", dotm::list::render_packages(loader.root(), verbose));
+                }
+                ListWhat::Roles { verbose } => {
+                    print!("{}", dotm::list::render_roles(&loader, verbose)?);
+                }
+                ListWhat::Hosts { verbose, tree } => {
+                    if tree {
+                        print!("{}", dotm::list::render_tree(&loader)?);
+                    } else {
+                        print!("{}", dotm::list::render_hosts(&loader, verbose)?);
+                    }
+                }
+            }
+        }
         Commands::Commit { message } => {
             let git_repo = dotm::git::GitRepo::open(&cli.dir).ok_or_else(|| {
                 anyhow::anyhow!("dotfiles directory is not a git repository")
@@ -569,6 +756,94 @@ fn main() -> anyhow::Result<()> {
                     eprintln!("Pull failed:\n{msg}");
                     std::process::exit(1);
                 }
+            }
+        }
+        Commands::Completions { shell } => {
+            let mut cmd = Cli::command();
+            clap_complete::generate(shell, &mut cmd, "dotm", &mut std::io::stdout());
+        }
+        Commands::Prune {
+            host,
+            dry_run,
+            system,
+        } => {
+            let hostname = match host {
+                Some(h) => h,
+                None => hostname::get()
+                    .map(|h| h.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| {
+                        eprintln!("error: could not detect hostname, use --host to specify");
+                        std::process::exit(1);
+                    }),
+            };
+
+            let target_dir = dirs::home_dir().unwrap_or_else(|| {
+                eprintln!("error: could not determine home directory");
+                std::process::exit(1);
+            });
+
+            let state_dir = if system {
+                check_system_privileges();
+                system_state_dir()
+            } else {
+                dotm_state_dir()
+            };
+
+            // Load existing state to find what's currently managed
+            let existing_state = dotm::state::DeployState::load_locked(&state_dir)?;
+            if existing_state.entries().is_empty() {
+                println!("No files currently managed by dotm.");
+                return Ok(());
+            }
+
+            // Run a deploy scan to determine what *would* be deployed now
+            let mut orch = Orchestrator::new(&cli.dir, &target_dir)?
+                .with_state_dir(&state_dir)
+                .with_system_mode(system);
+            let report = orch.deploy(&hostname, true, false)?; // dry run to get the target set
+
+            let new_targets: std::collections::HashSet<std::path::PathBuf> = report
+                .dry_run_actions
+                .iter()
+                .cloned()
+                .collect();
+
+            let mut pruned = 0;
+            for entry in existing_state.entries() {
+                if !new_targets.contains(&entry.target) {
+                    if dry_run {
+                        println!("  ? {}", entry.target.display());
+                    } else {
+                        if entry.target.is_symlink() || entry.target.exists() {
+                            let _ = std::fs::remove_file(&entry.target);
+                            dotm::state::cleanup_empty_parents(&entry.target);
+                        }
+                        if entry.staged != entry.target && entry.staged.exists() {
+                            let _ = std::fs::remove_file(&entry.staged);
+                            dotm::state::cleanup_empty_parents(&entry.staged);
+                        }
+                        println!("  - {}", entry.target.display());
+                    }
+                    pruned += 1;
+                }
+            }
+
+            if dry_run {
+                if pruned > 0 {
+                    println!("Dry run — would prune {pruned} orphaned files.");
+                } else {
+                    println!("No orphaned files to prune.");
+                }
+            } else if pruned > 0 {
+                // Re-deploy to update state without orphans
+                drop(existing_state); // release lock
+                let mut orch2 = Orchestrator::new(&cli.dir, &target_dir)?
+                    .with_state_dir(&state_dir)
+                    .with_system_mode(system);
+                orch2.deploy(&hostname, false, true)?;
+                println!("Pruned {pruned} orphaned files.");
+            } else {
+                println!("No orphaned files to prune.");
             }
         }
         Commands::Sync {

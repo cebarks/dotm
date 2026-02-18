@@ -1,6 +1,7 @@
 use crate::hash;
 use crate::scanner::EntryKind;
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -56,15 +57,20 @@ impl FileStatus {
 }
 
 const STATE_FILE: &str = "dotm-state.json";
+const CURRENT_VERSION: u32 = 2;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct DeployState {
+    #[serde(default)]
+    version: u32,
     #[serde(skip)]
     state_dir: PathBuf,
+    #[serde(skip)]
+    lock: Option<std::fs::File>,
     entries: Vec<DeployEntry>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeployEntry {
     pub target: PathBuf,
     pub staged: PathBuf,
@@ -91,6 +97,7 @@ pub struct DeployEntry {
 impl DeployState {
     pub fn new(state_dir: &Path) -> Self {
         Self {
+            version: CURRENT_VERSION,
             state_dir: state_dir.to_path_buf(),
             ..Default::default()
         }
@@ -106,7 +113,41 @@ impl DeployState {
             .with_context(|| format!("failed to read state file: {}", path.display()))?;
         let mut state: DeployState = serde_json::from_str(&content)
             .with_context(|| format!("failed to parse state file: {}", path.display()))?;
+        if state.version > CURRENT_VERSION {
+            anyhow::bail!(
+                "state file was created by a newer version of dotm (state version {}, max supported {})",
+                state.version, CURRENT_VERSION
+            );
+        }
+        if state.version < CURRENT_VERSION {
+            state.version = CURRENT_VERSION;
+        }
         state.state_dir = state_dir.to_path_buf();
+        Ok(state)
+    }
+
+    /// Load state with an exclusive file lock to prevent concurrent access.
+    /// The lock is held until the DeployState is dropped.
+    pub fn load_locked(state_dir: &Path) -> Result<Self> {
+        std::fs::create_dir_all(state_dir)
+            .with_context(|| format!("failed to create state directory: {}", state_dir.display()))?;
+        let lock_path = state_dir.join("dotm.lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| format!("failed to open lock file: {}", lock_path.display()))?;
+
+        lock_file.try_lock_exclusive().map_err(|_| {
+            anyhow::anyhow!(
+                "another dotm process is running (could not acquire lock on {})",
+                lock_path.display()
+            )
+        })?;
+
+        let mut state = Self::load(state_dir)?;
+        state.lock = Some(lock_file);
         Ok(state)
     }
 
@@ -126,6 +167,16 @@ impl DeployState {
 
     pub fn entries(&self) -> &[DeployEntry] {
         &self.entries
+    }
+
+    pub fn entries_mut(&mut self) -> &mut [DeployEntry] {
+        &mut self.entries
+    }
+
+    pub fn update_entry_hash(&mut self, index: usize, new_hash: String) {
+        if let Some(entry) = self.entries.get_mut(index) {
+            entry.content_hash = new_hash;
+        }
     }
 
     pub fn check_entry_status(&self, entry: &DeployEntry) -> FileStatus {
@@ -293,6 +344,36 @@ impl DeployState {
         Ok(restored)
     }
 
+    /// Remove managed files for a single package and save updated state.
+    pub fn undeploy_package(&mut self, package: &str) -> Result<usize> {
+        let mut removed = 0;
+        let mut remaining = Vec::new();
+
+        for entry in &self.entries {
+            if entry.package == package {
+                if entry.target.is_symlink() || entry.target.exists() {
+                    std::fs::remove_file(&entry.target)
+                        .with_context(|| format!("failed to remove target: {}", entry.target.display()))?;
+                    cleanup_empty_parents(&entry.target);
+                    removed += 1;
+                }
+
+                if entry.staged != entry.target && entry.staged.exists() {
+                    std::fs::remove_file(&entry.staged)
+                        .with_context(|| format!("failed to remove staged file: {}", entry.staged.display()))?;
+                    cleanup_empty_parents(&entry.staged);
+                }
+            } else {
+                remaining.push(entry.clone());
+            }
+        }
+
+        self.entries = remaining;
+        self.save()?;
+
+        Ok(removed)
+    }
+
     /// Remove all managed files and return a count of removed files.
     pub fn undeploy(&self) -> Result<usize> {
         let mut removed = 0;
@@ -334,7 +415,7 @@ impl DeployState {
     }
 }
 
-fn cleanup_empty_parents(path: &Path) {
+pub fn cleanup_empty_parents(path: &Path) {
     let mut current = path.parent();
     while let Some(parent) = current {
         if parent == Path::new("") || parent == Path::new("/") {
@@ -415,5 +496,23 @@ mod tests {
         DeployState::migrate_storage(dir.path()).unwrap();
 
         assert_eq!(std::fs::read_to_string(deployed.join("hash1")).unwrap(), "existing");
+    }
+
+    #[test]
+    fn concurrent_lock_fails() {
+        use fs2::FileExt;
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path()).unwrap();
+        let lock_path = dir.path().join("dotm.lock");
+        std::fs::write(&lock_path, "").unwrap();
+
+        // Hold the lock
+        let f = std::fs::File::open(&lock_path).unwrap();
+        f.lock_exclusive().unwrap();
+
+        // Try to acquire from DeployState — should fail
+        let result = DeployState::load_locked(dir.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("another dotm process"));
     }
 }

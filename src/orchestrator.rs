@@ -20,6 +20,7 @@ pub struct Orchestrator {
     state_dir: Option<PathBuf>,
     staging_dir: PathBuf,
     system_mode: bool,
+    package_filter: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -29,6 +30,8 @@ pub struct DeployReport {
     pub unchanged: Vec<PathBuf>,
     pub conflicts: Vec<(PathBuf, String)>,
     pub dry_run_actions: Vec<PathBuf>,
+    pub orphaned: Vec<PathBuf>,
+    pub pruned: Vec<PathBuf>,
 }
 
 struct PendingAction {
@@ -49,6 +52,7 @@ impl Orchestrator {
             state_dir: None,
             staging_dir,
             system_mode: false,
+            package_filter: None,
         })
     }
 
@@ -59,6 +63,11 @@ impl Orchestrator {
 
     pub fn with_system_mode(mut self, system: bool) -> Self {
         self.system_mode = system;
+        self
+    }
+
+    pub fn with_package_filter(mut self, filter: Option<String>) -> Self {
+        self.package_filter = filter;
         self
     }
 
@@ -122,7 +131,14 @@ impl Orchestrator {
 
         // 3. Resolve dependencies
         let requested_refs: Vec<&str> = all_requested_packages.iter().map(|s| s.as_str()).collect();
-        let resolved = resolver::resolve_packages(self.loader.root(), &requested_refs)?;
+        let mut resolved = resolver::resolve_packages(self.loader.root(), &requested_refs)?;
+
+        // 3.5. Apply package filter if set
+        if let Some(ref filter) = self.package_filter {
+            let filter_refs: Vec<&str> = vec![filter.as_str()];
+            let filtered = resolver::resolve_packages(self.loader.root(), &filter_refs)?;
+            resolved.retain(|pkg| filtered.contains(pkg));
+        }
 
         // 4. Collect role names for override resolution
         let role_names: Vec<&str> = host.roles.iter().map(|s| s.as_str()).collect();
@@ -154,7 +170,7 @@ impl Orchestrator {
 
             let pkg_target = if let Some(pkg_config) = self.loader.root().packages.get(pkg_name) {
                 if let Some(ref target) = pkg_config.target {
-                    PathBuf::from(shellexpand_tilde(target))
+                    PathBuf::from(expand_path(target, Some(&format!("package '{pkg_name}'")))?)
                 } else {
                     self.target_dir.clone()
                 }
@@ -214,8 +230,56 @@ impl Orchestrator {
             .map(|e| (e.staged.clone(), e.content_hash.as_str()))
             .collect();
 
-        // Phase 4: Deploy each action
+        // Phase 4: Deploy each action (with per-package hooks)
+        let mut current_pkg: Option<String> = None;
+        let mut skip_pkg: Option<String> = None;
+
         for p in &pending {
+            // Run pre_deploy hook when entering a new package
+            if current_pkg.as_deref() != Some(&p.pkg_name) {
+                // Run post_deploy for the previous package
+                if let Some(ref prev_pkg) = current_pkg {
+                    if !dry_run {
+                        if let Some(pkg_config) = self.loader.root().packages.get(prev_pkg) {
+                            if let Some(ref cmd) = pkg_config.post_deploy {
+                                let pkg_target = pending.iter()
+                                    .find(|pp| pp.pkg_name == *prev_pkg)
+                                    .map(|pp| &pp.pkg_target)
+                                    .unwrap();
+                                if let Err(e) = crate::hooks::run_hook(cmd, pkg_target, prev_pkg, "deploy") {
+                                    eprintln!("warning: {e}");
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Run pre_deploy for the new package
+                if !dry_run {
+                    if let Some(pkg_config) = self.loader.root().packages.get(&p.pkg_name) {
+                        if let Some(ref cmd) = pkg_config.pre_deploy {
+                            if let Err(e) = crate::hooks::run_hook(cmd, &p.pkg_target, &p.pkg_name, "deploy") {
+                                eprintln!("warning: pre_deploy hook failed, skipping package '{}': {e}", p.pkg_name);
+                                skip_pkg = Some(p.pkg_name.clone());
+                                current_pkg = Some(p.pkg_name.clone());
+                                continue;
+                            }
+                        }
+                    }
+                }
+                skip_pkg = None;
+                current_pkg = Some(p.pkg_name.clone());
+            }
+
+            // Skip all files for a package whose pre_deploy hook failed
+            if skip_pkg.as_deref() == Some(&p.pkg_name) {
+                report.conflicts.push((
+                    p.pkg_target.join(&p.action.target_rel_path),
+                    "skipped: pre_deploy hook failed".to_string(),
+                ));
+                continue;
+            }
+
             let target_path = p.pkg_target.join(&p.action.target_rel_path);
 
             match p.strategy {
@@ -303,19 +367,7 @@ impl Orchestrator {
                                 }
                             } else {
                                 metadata::resolve_metadata(
-                                    &crate::config::PackageConfig {
-                                        description: None,
-                                        depends: vec![],
-                                        suggests: vec![],
-                                        target: None,
-                                        strategy: None,
-                                        system: false,
-                                        owner: None,
-                                        group: None,
-                                        permissions: Default::default(),
-                                        ownership: Default::default(),
-                                        preserve: Default::default(),
-                                    },
+                                    &crate::config::PackageConfig::default(),
                                     "",
                                 )
                             };
@@ -339,7 +391,11 @@ impl Orchestrator {
                                 original_mode,
                             });
 
-                            report.created.push(target_path.clone());
+                            if matches!(result, DeployResult::Updated) {
+                                report.updated.push(target_path.clone());
+                            } else {
+                                report.created.push(target_path.clone());
+                            }
                         }
                         DeployResult::Conflict(msg) => {
                             report.conflicts.push((target_path, msg));
@@ -432,19 +488,7 @@ impl Orchestrator {
                                 }
                             } else {
                                 metadata::resolve_metadata(
-                                    &crate::config::PackageConfig {
-                                        description: None,
-                                        depends: vec![],
-                                        suggests: vec![],
-                                        target: None,
-                                        strategy: None,
-                                        system: false,
-                                        owner: None,
-                                        group: None,
-                                        permissions: Default::default(),
-                                        ownership: Default::default(),
-                                        preserve: Default::default(),
-                                    },
+                                    &crate::config::PackageConfig::default(),
                                     "",
                                 )
                             };
@@ -468,7 +512,11 @@ impl Orchestrator {
                                 original_mode,
                             });
 
-                            report.created.push(target_path);
+                            if matches!(result, DeployResult::Updated) {
+                                report.updated.push(target_path);
+                            } else {
+                                report.created.push(target_path);
+                            }
                         }
                         DeployResult::Conflict(msg) => {
                             report.conflicts.push((target_path, msg));
@@ -477,6 +525,49 @@ impl Orchestrator {
                             report.dry_run_actions.push(target_path);
                         }
                         _ => {}
+                    }
+                }
+            }
+        }
+
+        // Run post_deploy for the final package
+        if let Some(ref last_pkg) = current_pkg {
+            if !dry_run && skip_pkg.as_deref() != Some(last_pkg) {
+                if let Some(pkg_config) = self.loader.root().packages.get(last_pkg) {
+                    if let Some(ref cmd) = pkg_config.post_deploy {
+                        let pkg_target = pending.iter()
+                            .find(|pp| pp.pkg_name == *last_pkg)
+                            .map(|pp| &pp.pkg_target)
+                            .unwrap();
+                        if let Err(e) = crate::hooks::run_hook(cmd, pkg_target, last_pkg, "deploy") {
+                            eprintln!("warning: {e}");
+                        }
+                    }
+                }
+            }
+        }
+
+        // Phase 4.5: Detect orphaned files
+        if self.state_dir.is_some() {
+            let new_targets: std::collections::HashSet<PathBuf> = pending
+                .iter()
+                .map(|p| p.pkg_target.join(&p.action.target_rel_path))
+                .collect();
+
+            for old_entry in existing_state.entries() {
+                if !new_targets.contains(&old_entry.target) {
+                    report.orphaned.push(old_entry.target.clone());
+
+                    if !dry_run && self.loader.root().dotm.auto_prune {
+                        if old_entry.target.is_symlink() || old_entry.target.exists() {
+                            let _ = std::fs::remove_file(&old_entry.target);
+                            crate::state::cleanup_empty_parents(&old_entry.target);
+                        }
+                        if old_entry.staged != old_entry.target && old_entry.staged.exists() {
+                            let _ = std::fs::remove_file(&old_entry.staged);
+                            crate::state::cleanup_empty_parents(&old_entry.staged);
+                        }
+                        report.pruned.push(old_entry.target.clone());
                     }
                 }
             }
@@ -506,11 +597,16 @@ impl Orchestrator {
     }
 }
 
-fn shellexpand_tilde(path: &str) -> String {
-    if (path.starts_with("~/") || path == "~")
-        && let Ok(home) = std::env::var("HOME")
-    {
-        return path.replacen('~', &home, 1);
-    }
-    path.to_string()
+/// Expand shell variables and tilde in a path string.
+/// Errors if a referenced environment variable is not defined.
+pub fn expand_path(path: &str, context: Option<&str>) -> Result<String> {
+    shellexpand::full(path)
+        .map(|s| s.into_owned())
+        .map_err(|e| {
+            if let Some(ctx) = context {
+                anyhow::anyhow!("{ctx}: {e}")
+            } else {
+                anyhow::anyhow!("path expansion failed: {e}")
+            }
+        })
 }

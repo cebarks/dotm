@@ -4,6 +4,8 @@ pub mod deployer;
 pub mod diff;
 pub mod git;
 pub mod hash;
+pub mod hooks;
+pub mod list;
 pub mod loader;
 pub mod metadata;
 pub mod orchestrator;

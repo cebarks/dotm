@@ -8,17 +8,9 @@ fn make_root(packages: Vec<(&str, Vec<&str>, Vec<&str>)>) -> RootConfig {
         pkg_map.insert(
             name.to_string(),
             PackageConfig {
-                description: None,
                 depends: deps.into_iter().map(String::from).collect(),
                 suggests: suggests.into_iter().map(String::from).collect(),
-                target: None,
-                strategy: None,
-                permissions: Default::default(),
-                system: false,
-                owner: None,
-                group: None,
-                ownership: Default::default(),
-                preserve: Default::default(),
+                ..Default::default()
             },
         );
     }
@@ -26,6 +18,7 @@ fn make_root(packages: Vec<(&str, Vec<&str>, Vec<&str>)>) -> RootConfig {
         dotm: DotmSettings {
             target: "~".to_string(),
             packages_dir: "packages".to_string(),
+            auto_prune: false,
         },
         packages: pkg_map,
     }

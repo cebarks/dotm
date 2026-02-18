@@ -45,6 +45,44 @@ impl ConfigLoader {
         Ok(config)
     }
 
+    pub fn list_hosts(&self) -> Result<Vec<String>> {
+        let hosts_dir = self.base_dir.join("hosts");
+        if !hosts_dir.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut names = Vec::new();
+        for entry in std::fs::read_dir(&hosts_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    names.push(stem.to_string());
+                }
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    pub fn list_roles(&self) -> Result<Vec<String>> {
+        let roles_dir = self.base_dir.join("roles");
+        if !roles_dir.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut names = Vec::new();
+        for entry in std::fs::read_dir(&roles_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    names.push(stem.to_string());
+                }
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
+
     pub fn load_role(&self, name: &str) -> Result<RoleConfig> {
         let path = self.base_dir.join("roles").join(format!("{name}.toml"));
         if !path.exists() {
