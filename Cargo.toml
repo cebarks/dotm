@@ -1,5 +1,5 @@
 [package]
-name = "dotm"
+name = "dotm-rs"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.87"
@@ -10,6 +10,13 @@ readme = "README.md"
 repository = "https://github.com/cebarks/dotm"
 keywords = ["dotfiles", "configuration", "symlink", "template", "stow"]
 categories = ["command-line-utilities", "config"]
+
+[lib]
+name = "dotm"
+
+[[bin]]
+name = "dotm"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"

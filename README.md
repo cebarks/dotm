@@ -7,7 +7,13 @@ dotm organizes config files into **packages** (directories mirroring your home d
 ## Installation
 
 ```bash
-cargo install --path .
+cargo install dotm-rs
+```
+
+Or to install from the latest source:
+
+```bash
+cargo install --git https://github.com/cebarks/dotm
 ```
 
 ## Quick Start
