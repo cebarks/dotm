@@ -1,6 +1,7 @@
 use crate::hash;
 use crate::scanner::EntryKind;
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -64,6 +65,8 @@ pub struct DeployState {
     version: u32,
     #[serde(skip)]
     state_dir: PathBuf,
+    #[serde(skip)]
+    lock: Option<std::fs::File>,
     entries: Vec<DeployEntry>,
 }
 
@@ -120,6 +123,31 @@ impl DeployState {
             state.version = CURRENT_VERSION;
         }
         state.state_dir = state_dir.to_path_buf();
+        Ok(state)
+    }
+
+    /// Load state with an exclusive file lock to prevent concurrent access.
+    /// The lock is held until the DeployState is dropped.
+    pub fn load_locked(state_dir: &Path) -> Result<Self> {
+        std::fs::create_dir_all(state_dir)
+            .with_context(|| format!("failed to create state directory: {}", state_dir.display()))?;
+        let lock_path = state_dir.join("dotm.lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| format!("failed to open lock file: {}", lock_path.display()))?;
+
+        lock_file.try_lock_exclusive().map_err(|_| {
+            anyhow::anyhow!(
+                "another dotm process is running (could not acquire lock on {})",
+                lock_path.display()
+            )
+        })?;
+
+        let mut state = Self::load(state_dir)?;
+        state.lock = Some(lock_file);
         Ok(state)
     }
 
@@ -428,5 +456,23 @@ mod tests {
         DeployState::migrate_storage(dir.path()).unwrap();
 
         assert_eq!(std::fs::read_to_string(deployed.join("hash1")).unwrap(), "existing");
+    }
+
+    #[test]
+    fn concurrent_lock_fails() {
+        use fs2::FileExt;
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path()).unwrap();
+        let lock_path = dir.path().join("dotm.lock");
+        std::fs::write(&lock_path, "").unwrap();
+
+        // Hold the lock
+        let f = std::fs::File::open(&lock_path).unwrap();
+        f.lock_exclusive().unwrap();
+
+        // Try to acquire from DeployState — should fail
+        let result = DeployState::load_locked(dir.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("another dotm process"));
     }
 }

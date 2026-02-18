@@ -195,7 +195,7 @@ fn main() -> anyhow::Result<()> {
             } else {
                 dotm_state_dir()
             };
-            let state = dotm::state::DeployState::load(&state_dir)?;
+            let state = dotm::state::DeployState::load_locked(&state_dir)?;
 
             if state.entries().is_empty() {
                 println!("No files currently managed by dotm.");
@@ -230,7 +230,7 @@ fn main() -> anyhow::Result<()> {
             } else {
                 dotm_state_dir()
             };
-            let state = dotm::state::DeployState::load(&state_dir)?;
+            let state = dotm::state::DeployState::load_locked(&state_dir)?;
             let removed = state.undeploy()?;
             println!("Removed {removed} managed files.");
         }
@@ -357,7 +357,7 @@ fn main() -> anyhow::Result<()> {
             } else {
                 dotm_state_dir()
             };
-            let state = dotm::state::DeployState::load(&state_dir)?;
+            let state = dotm::state::DeployState::load_locked(&state_dir)?;
             let mut adopted_count = 0;
 
             for entry in state.entries() {
