@@ -2,12 +2,20 @@ use dotm::orchestrator::Orchestrator;
 use std::path::Path;
 use tempfile::TempDir;
 
+/// Copy a fixture directory to a temp dir so tests don't race on .staged/
+fn use_fixture(fixture: &str) -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    let src = Path::new("tests/fixtures").join(fixture);
+    copy_dir_recursive(&src, tmp.path());
+    tmp
+}
+
 #[test]
 fn e2e_deploy_and_undeploy() {
     let target = TempDir::new().unwrap();
-    let dotfiles = Path::new("tests/fixtures/basic");
+    let dotfiles = use_fixture("basic");
 
-    let mut orch = Orchestrator::new(dotfiles, target.path()).unwrap();
+    let mut orch = Orchestrator::new(dotfiles.path(), target.path()).unwrap();
     let report = orch.deploy("testhost", false, false).unwrap();
 
     assert!(report.conflicts.is_empty());
@@ -26,9 +34,9 @@ fn e2e_deploy_and_undeploy() {
 #[test]
 fn e2e_deploy_with_overrides() {
     let target = TempDir::new().unwrap();
-    let dotfiles = Path::new("tests/fixtures/overrides");
+    let dotfiles = use_fixture("overrides");
 
-    let mut orch = Orchestrator::new(dotfiles, target.path()).unwrap();
+    let mut orch = Orchestrator::new(dotfiles.path(), target.path()).unwrap();
     let report = orch.deploy("myhost", false, false).unwrap();
 
     assert!(
@@ -52,9 +60,9 @@ fn e2e_deploy_with_overrides() {
 #[test]
 fn e2e_deploy_with_template_rendering() {
     let target = TempDir::new().unwrap();
-    let dotfiles = Path::new("tests/fixtures/overrides");
+    let dotfiles = use_fixture("overrides");
 
-    let mut orch = Orchestrator::new(dotfiles, target.path()).unwrap();
+    let mut orch = Orchestrator::new(dotfiles.path(), target.path()).unwrap();
     let report = orch.deploy("myhost", false, false).unwrap();
 
     assert!(report.conflicts.is_empty());
@@ -73,13 +81,13 @@ fn e2e_deploy_with_template_rendering() {
 #[test]
 fn e2e_idempotent_deploy() {
     let target = TempDir::new().unwrap();
-    let dotfiles = Path::new("tests/fixtures/basic");
+    let dotfiles = use_fixture("basic");
 
-    let mut orch = Orchestrator::new(dotfiles, target.path()).unwrap();
+    let mut orch = Orchestrator::new(dotfiles.path(), target.path()).unwrap();
     orch.deploy("testhost", false, false).unwrap();
 
     // Deploy again — should succeed without conflicts (symlinks get replaced)
-    let mut orch2 = Orchestrator::new(dotfiles, target.path()).unwrap();
+    let mut orch2 = Orchestrator::new(dotfiles.path(), target.path()).unwrap();
     let report2 = orch2.deploy("testhost", false, false).unwrap();
     assert!(
         report2.conflicts.is_empty(),
@@ -91,21 +99,16 @@ fn e2e_idempotent_deploy() {
 #[test]
 fn e2e_role_override_when_no_host_match() {
     let target = TempDir::new().unwrap();
-    let dotfiles = Path::new("tests/fixtures/overrides");
-
-    // Deploy as a host that doesn't have a host-specific override but has the desktop role
-    // We need a host config for this — create one in a temp dotfiles dir
-    let dotfiles_tmp = TempDir::new().unwrap();
-    copy_dir_recursive(dotfiles, dotfiles_tmp.path());
+    let dotfiles = use_fixture("overrides");
 
     // Create a new host that uses the desktop role but isn't "myhost"
     std::fs::write(
-        dotfiles_tmp.path().join("hosts/althost.toml"),
+        dotfiles.path().join("hosts/althost.toml"),
         "hostname = \"althost\"\nroles = [\"desktop\"]\n\n[vars]\napp.color = \"red\"\n",
     )
     .unwrap();
 
-    let mut orch = Orchestrator::new(dotfiles_tmp.path(), target.path()).unwrap();
+    let mut orch = Orchestrator::new(dotfiles.path(), target.path()).unwrap();
     let report = orch.deploy("althost", false, false).unwrap();
 
     assert!(report.conflicts.is_empty());
@@ -122,10 +125,10 @@ fn e2e_role_override_when_no_host_match() {
 #[test]
 fn e2e_deploy_stages_all_files() {
     let target = TempDir::new().unwrap();
-    let dotfiles = Path::new("tests/fixtures/basic");
+    let dotfiles = use_fixture("basic");
     let state_dir = TempDir::new().unwrap();
 
-    let mut orch = Orchestrator::new(dotfiles, target.path())
+    let mut orch = Orchestrator::new(dotfiles.path(), target.path())
         .unwrap()
         .with_state_dir(state_dir.path());
     let report = orch.deploy("testhost", false, false).unwrap();
@@ -248,6 +251,10 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
         if src_path.is_dir() {
+            // Skip .staged directories — they're test artifacts
+            if src_path.file_name().unwrap() == ".staged" {
+                continue;
+            }
             std::fs::create_dir_all(&dst_path).unwrap();
             copy_dir_recursive(&src_path, &dst_path);
         } else {
