@@ -70,7 +70,7 @@ pub struct DeployState {
     entries: Vec<DeployEntry>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeployEntry {
     pub target: PathBuf,
     pub staged: PathBuf,
@@ -342,6 +342,36 @@ impl DeployState {
         }
 
         Ok(restored)
+    }
+
+    /// Remove managed files for a single package and save updated state.
+    pub fn undeploy_package(&mut self, package: &str) -> Result<usize> {
+        let mut removed = 0;
+        let mut remaining = Vec::new();
+
+        for entry in &self.entries {
+            if entry.package == package {
+                if entry.target.is_symlink() || entry.target.exists() {
+                    std::fs::remove_file(&entry.target)
+                        .with_context(|| format!("failed to remove target: {}", entry.target.display()))?;
+                    cleanup_empty_parents(&entry.target);
+                    removed += 1;
+                }
+
+                if entry.staged != entry.target && entry.staged.exists() {
+                    std::fs::remove_file(&entry.staged)
+                        .with_context(|| format!("failed to remove staged file: {}", entry.staged.display()))?;
+                    cleanup_empty_parents(&entry.staged);
+                }
+            } else {
+                remaining.push(entry.clone());
+            }
+        }
+
+        self.entries = remaining;
+        self.save()?;
+
+        Ok(removed)
     }
 
     /// Remove all managed files and return a count of removed files.

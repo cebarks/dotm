@@ -20,6 +20,7 @@ pub struct Orchestrator {
     state_dir: Option<PathBuf>,
     staging_dir: PathBuf,
     system_mode: bool,
+    package_filter: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -49,6 +50,7 @@ impl Orchestrator {
             state_dir: None,
             staging_dir,
             system_mode: false,
+            package_filter: None,
         })
     }
 
@@ -59,6 +61,11 @@ impl Orchestrator {
 
     pub fn with_system_mode(mut self, system: bool) -> Self {
         self.system_mode = system;
+        self
+    }
+
+    pub fn with_package_filter(mut self, filter: Option<String>) -> Self {
+        self.package_filter = filter;
         self
     }
 
@@ -122,7 +129,14 @@ impl Orchestrator {
 
         // 3. Resolve dependencies
         let requested_refs: Vec<&str> = all_requested_packages.iter().map(|s| s.as_str()).collect();
-        let resolved = resolver::resolve_packages(self.loader.root(), &requested_refs)?;
+        let mut resolved = resolver::resolve_packages(self.loader.root(), &requested_refs)?;
+
+        // 3.5. Apply package filter if set
+        if let Some(ref filter) = self.package_filter {
+            let filter_refs: Vec<&str> = vec![filter.as_str()];
+            let filtered = resolver::resolve_packages(self.loader.root(), &filter_refs)?;
+            resolved.retain(|pkg| filtered.contains(pkg));
+        }
 
         // 4. Collect role names for override resolution
         let role_names: Vec<&str> = host.roles.iter().map(|s| s.as_str()).collect();

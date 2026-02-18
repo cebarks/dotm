@@ -29,12 +29,18 @@ enum Commands {
         /// Operate on system packages (requires root)
         #[arg(long)]
         system: bool,
+        /// Deploy only this package (and its dependencies)
+        #[arg(short, long)]
+        package: Option<String>,
     },
     /// Remove all managed symlinks and copies
     Undeploy {
         /// Operate on system packages (requires root)
         #[arg(long)]
         system: bool,
+        /// Undeploy only this package
+        #[arg(short, long)]
+        package: Option<String>,
     },
     /// Show deployment status
     Status {
@@ -124,6 +130,7 @@ fn main() -> anyhow::Result<()> {
             dry_run,
             force,
             system,
+            package,
         } => {
             let hostname = match host {
                 Some(h) => h,
@@ -149,7 +156,8 @@ fn main() -> anyhow::Result<()> {
 
             let mut orch = Orchestrator::new(&cli.dir, &target_dir)?
                 .with_state_dir(&state_dir)
-                .with_system_mode(system);
+                .with_system_mode(system)
+                .with_package_filter(package);
 
             if system && !orch.loader().root().packages.values().any(|p| p.system) {
                 println!("no system packages configured");
@@ -223,15 +231,19 @@ fn main() -> anyhow::Result<()> {
                 println!("Restored {} files.", restored);
             }
         }
-        Commands::Undeploy { system } => {
+        Commands::Undeploy { system, package } => {
             let state_dir = if system {
                 check_system_privileges();
                 system_state_dir()
             } else {
                 dotm_state_dir()
             };
-            let state = dotm::state::DeployState::load_locked(&state_dir)?;
-            let removed = state.undeploy()?;
+            let mut state = dotm::state::DeployState::load_locked(&state_dir)?;
+            let removed = if let Some(ref pkg) = package {
+                state.undeploy_package(pkg)?
+            } else {
+                state.undeploy()?
+            };
             println!("Removed {removed} managed files.");
         }
         Commands::Status { verbose, short, package, system } => {

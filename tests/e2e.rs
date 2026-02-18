@@ -245,6 +245,25 @@ description = "Scripts"
     );
 }
 
+#[test]
+fn e2e_deploy_single_package() {
+    let target = TempDir::new().unwrap();
+    let dotfiles = use_fixture("basic");
+    let state_dir = TempDir::new().unwrap();
+
+    let mut orch = Orchestrator::new(dotfiles.path(), target.path())
+        .unwrap()
+        .with_state_dir(state_dir.path())
+        .with_package_filter(Some("shell".to_string()));
+    let report = orch.deploy("testhost", false, false).unwrap();
+
+    assert!(report.conflicts.is_empty());
+    // shell should be deployed
+    assert!(target.path().join(".bashrc").exists());
+    // editor should NOT be deployed (it's not in the filter)
+    assert!(!target.path().join(".config/nvim/init.lua").exists());
+}
+
 fn copy_dir_recursive(src: &Path, dst: &Path) {
     for entry in std::fs::read_dir(src).unwrap() {
         let entry = entry.unwrap();
