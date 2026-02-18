@@ -11,6 +11,7 @@ pub struct PackageStatus {
     pub ok: usize,
     pub modified: usize,
     pub missing: usize,
+    pub metadata_drift: usize,
     pub files: Vec<FileEntry>,
 }
 
@@ -33,14 +34,12 @@ pub fn group_by_package(entries: &[DeployEntry], statuses: &[FileStatus]) -> Vec
         .into_iter()
         .map(|(name, files)| {
             let total = files.len();
-            let ok = files.iter().filter(|(_, s)| *s == FileStatus::Ok).count();
-            let modified = files
+            let ok = files.iter().filter(|(_, s)| s.is_ok()).count();
+            let modified = files.iter().filter(|(_, s)| s.is_modified()).count();
+            let missing = files.iter().filter(|(_, s)| s.is_missing()).count();
+            let metadata_drift = files
                 .iter()
-                .filter(|(_, s)| *s == FileStatus::Modified)
-                .count();
-            let missing = files
-                .iter()
-                .filter(|(_, s)| *s == FileStatus::Missing)
+                .filter(|(_, s)| s.has_metadata_drift() && !s.is_modified())
                 .count();
             let file_entries = files
                 .into_iter()
@@ -56,6 +55,7 @@ pub fn group_by_package(entries: &[DeployEntry], statuses: &[FileStatus]) -> Vec
                 ok,
                 modified,
                 missing,
+                metadata_drift,
                 files: file_entries,
             }
         })
@@ -84,14 +84,12 @@ pub fn render_default(groups: &[PackageStatus]) -> String {
         ));
 
         for file in &pkg.files {
-            match file.status {
-                FileStatus::Ok => {}
-                FileStatus::Modified => {
-                    out.push_str(&format!("  M {}\n", file.display_path));
-                }
-                FileStatus::Missing => {
-                    out.push_str(&format!("  ! {}\n", file.display_path));
-                }
+            if file.status.is_missing() {
+                out.push_str(&format!("  ! {}\n", file.display_path));
+            } else if file.status.is_modified() {
+                out.push_str(&format!("  M {}\n", file.display_path));
+            } else if file.status.has_metadata_drift() {
+                out.push_str(&format!("  P {}\n", file.display_path));
             }
         }
     }
@@ -111,10 +109,14 @@ pub fn render_verbose(groups: &[PackageStatus]) -> String {
         ));
 
         for file in &pkg.files {
-            let marker = match file.status {
-                FileStatus::Ok => "~",
-                FileStatus::Modified => "M",
-                FileStatus::Missing => "!",
+            let marker = if file.status.is_missing() {
+                "!"
+            } else if file.status.is_modified() {
+                "M"
+            } else if file.status.has_metadata_drift() {
+                "P"
+            } else {
+                "~"
             };
             out.push_str(&format!("  {} {}\n", marker, file.display_path));
         }
@@ -163,7 +165,7 @@ fn files_label(count: usize) -> String {
 }
 
 fn status_summary(pkg: &PackageStatus) -> String {
-    if pkg.modified == 0 && pkg.missing == 0 {
+    if pkg.modified == 0 && pkg.missing == 0 && pkg.metadata_drift == 0 {
         return "ok".to_string();
     }
 
@@ -173,6 +175,9 @@ fn status_summary(pkg: &PackageStatus) -> String {
     }
     if pkg.missing > 0 {
         parts.push(format!("{} missing", pkg.missing));
+    }
+    if pkg.metadata_drift > 0 {
+        parts.push(format!("{} metadata", pkg.metadata_drift));
     }
     parts.join(", ")
 }
@@ -198,22 +203,24 @@ pub fn print_status_default(groups: &[PackageStatus], color: bool) {
         }
 
         for file in &pkg.files {
-            match file.status {
-                FileStatus::Modified => {
-                    if color {
-                        println!("  {} {}", "M".yellow(), file.display_path);
-                    } else {
-                        println!("  M {}", file.display_path);
-                    }
+            if file.status.is_missing() {
+                if color {
+                    println!("  {} {}", "!".red(), file.display_path);
+                } else {
+                    println!("  ! {}", file.display_path);
                 }
-                FileStatus::Missing => {
-                    if color {
-                        println!("  {} {}", "!".red(), file.display_path);
-                    } else {
-                        println!("  ! {}", file.display_path);
-                    }
+            } else if file.status.is_modified() {
+                if color {
+                    println!("  {} {}", "M".yellow(), file.display_path);
+                } else {
+                    println!("  M {}", file.display_path);
                 }
-                FileStatus::Ok => {}
+            } else if file.status.has_metadata_drift() {
+                if color {
+                    println!("  {} {}", "P".yellow(), file.display_path);
+                } else {
+                    println!("  P {}", file.display_path);
+                }
             }
         }
     }
@@ -236,28 +243,28 @@ pub fn print_status_verbose(groups: &[PackageStatus], color: bool) {
         }
 
         for file in &pkg.files {
-            match file.status {
-                FileStatus::Ok => {
-                    if color {
-                        println!("  {} {}", "~".green(), file.display_path);
-                    } else {
-                        println!("  ~ {}", file.display_path);
-                    }
+            if file.status.is_missing() {
+                if color {
+                    println!("  {} {}", "!".red(), file.display_path);
+                } else {
+                    println!("  ! {}", file.display_path);
                 }
-                FileStatus::Modified => {
-                    if color {
-                        println!("  {} {}", "M".yellow(), file.display_path);
-                    } else {
-                        println!("  M {}", file.display_path);
-                    }
+            } else if file.status.is_modified() {
+                if color {
+                    println!("  {} {}", "M".yellow(), file.display_path);
+                } else {
+                    println!("  M {}", file.display_path);
                 }
-                FileStatus::Missing => {
-                    if color {
-                        println!("  {} {}", "!".red(), file.display_path);
-                    } else {
-                        println!("  ! {}", file.display_path);
-                    }
+            } else if file.status.has_metadata_drift() {
+                if color {
+                    println!("  {} {}", "P".yellow(), file.display_path);
+                } else {
+                    println!("  P {}", file.display_path);
                 }
+            } else if color {
+                println!("  {} {}", "~".green(), file.display_path);
+            } else {
+                println!("  ~ {}", file.display_path);
             }
         }
     }
@@ -339,8 +346,15 @@ mod tests {
             staged: PathBuf::from(format!("/staged{target}")),
             source: PathBuf::from(format!("/source{target}")),
             content_hash: hash.to_string(),
+            original_hash: None,
             kind: EntryKind::Base,
             package: package.to_string(),
+            owner: None,
+            group: None,
+            mode: None,
+            original_owner: None,
+            original_group: None,
+            original_mode: None,
         }
     }
 
@@ -351,7 +365,14 @@ mod tests {
             make_entry("/home/user/.zshrc", "shell", "h2"),
             make_entry("/home/user/.config/app.conf", "desktop", "h3"),
         ];
-        let statuses = vec![FileStatus::Ok, FileStatus::Ok, FileStatus::Modified];
+        let statuses = vec![
+            FileStatus::ok(),
+            FileStatus::ok(),
+            FileStatus {
+                content_modified: true,
+                ..FileStatus::ok()
+            },
+        ];
         let grouped = group_by_package(&entries, &statuses);
 
         assert_eq!(grouped.len(), 2);
@@ -370,7 +391,7 @@ mod tests {
             make_entry("/b", "bin", "h2"),
             make_entry("/c", "gaming", "h3"),
         ];
-        let statuses = vec![FileStatus::Ok, FileStatus::Ok, FileStatus::Ok];
+        let statuses = vec![FileStatus::ok(), FileStatus::ok(), FileStatus::ok()];
         let grouped = group_by_package(&entries, &statuses);
         let names: Vec<&str> = grouped.iter().map(|g| g.name.as_str()).collect();
         assert_eq!(names, vec!["bin", "gaming", "zsh"]);
@@ -382,7 +403,13 @@ mod tests {
             make_entry("/home/user/.bashrc", "shell", "h1"),
             make_entry("/home/user/.config/app.conf", "desktop", "h2"),
         ];
-        let statuses = vec![FileStatus::Ok, FileStatus::Modified];
+        let statuses = vec![
+            FileStatus::ok(),
+            FileStatus {
+                content_modified: true,
+                ..FileStatus::ok()
+            },
+        ];
         let grouped = group_by_package(&entries, &statuses);
         let output = render_default(&grouped);
         assert!(output.contains("shell"));
@@ -395,7 +422,7 @@ mod tests {
     #[test]
     fn render_default_hides_ok_files() {
         let entries = vec![make_entry("/home/user/.bashrc", "shell", "h1")];
-        let statuses = vec![FileStatus::Ok];
+        let statuses = vec![FileStatus::ok()];
         let grouped = group_by_package(&entries, &statuses);
         let output = render_default(&grouped);
         assert!(output.contains("shell"));
@@ -409,7 +436,7 @@ mod tests {
             make_entry("/home/user/.bashrc", "shell", "h1"),
             make_entry("/home/user/.zshrc", "shell", "h2"),
         ];
-        let statuses = vec![FileStatus::Ok, FileStatus::Ok];
+        let statuses = vec![FileStatus::ok(), FileStatus::ok()];
         let grouped = group_by_package(&entries, &statuses);
         let output = render_verbose(&grouped);
         assert!(output.contains(".bashrc"));

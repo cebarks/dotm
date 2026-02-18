@@ -12,8 +12,13 @@ fn make_root(packages: Vec<(&str, Vec<&str>, Vec<&str>)>) -> RootConfig {
                 depends: deps.into_iter().map(String::from).collect(),
                 suggests: suggests.into_iter().map(String::from).collect(),
                 target: None,
-                strategy: Default::default(),
+                strategy: None,
                 permissions: Default::default(),
+                system: false,
+                owner: None,
+                group: None,
+                ownership: Default::default(),
+                preserve: Default::default(),
             },
         );
     }

@@ -26,9 +26,16 @@ enum Commands {
         /// Overwrite existing unmanaged files
         #[arg(long)]
         force: bool,
+        /// Operate on system packages (requires root)
+        #[arg(long)]
+        system: bool,
     },
     /// Remove all managed symlinks and copies
-    Undeploy,
+    Undeploy {
+        /// Operate on system packages (requires root)
+        #[arg(long)]
+        system: bool,
+    },
     /// Show deployment status
     Status {
         /// Show all files, not just problems
@@ -40,14 +47,24 @@ enum Commands {
         /// Filter to a specific package
         #[arg(short, long)]
         package: Option<String>,
+        /// Operate on system packages (requires root)
+        #[arg(long)]
+        system: bool,
     },
     /// Show diffs for files modified since last deploy
     Diff {
         /// Only show diff for a specific file path
         path: Option<String>,
+        /// Operate on system packages (requires root)
+        #[arg(long)]
+        system: bool,
     },
     /// Interactively adopt changes made to deployed files back into source
-    Adopt,
+    Adopt {
+        /// Operate on system packages (requires root)
+        #[arg(long)]
+        system: bool,
+    },
     /// Validate configuration
     Check {
         /// Warn about undeployed suggested packages
@@ -69,6 +86,18 @@ enum Commands {
     Push,
     /// Pull dotfiles repository from remote
     Pull,
+    /// Restore files to their pre-dotm state
+    Restore {
+        /// Restore only system packages
+        #[arg(long)]
+        system: bool,
+        /// Filter to a specific package
+        #[arg(short, long)]
+        package: Option<String>,
+        /// Show what would be done without making changes
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Pull, deploy, and optionally push in one step
     Sync {
         /// Target host (defaults to system hostname)
@@ -80,6 +109,9 @@ enum Commands {
         /// Overwrite existing unmanaged files
         #[arg(long)]
         force: bool,
+        /// Operate on system packages (requires root)
+        #[arg(long)]
+        system: bool,
     },
 }
 
@@ -91,6 +123,7 @@ fn main() -> anyhow::Result<()> {
             host,
             dry_run,
             force,
+            system,
         } => {
             let hostname = match host {
                 Some(h) => h,
@@ -107,8 +140,22 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             });
 
-            let state_dir = dotm_state_dir();
-            let mut orch = Orchestrator::new(&cli.dir, &target_dir)?.with_state_dir(&state_dir);
+            let state_dir = if system {
+                check_system_privileges();
+                system_state_dir()
+            } else {
+                dotm_state_dir()
+            };
+
+            let mut orch = Orchestrator::new(&cli.dir, &target_dir)?
+                .with_state_dir(&state_dir)
+                .with_system_mode(system);
+
+            if system && !orch.loader().root().packages.values().any(|p| p.system) {
+                println!("no system packages configured");
+                return Ok(());
+            }
+
             let report = orch.deploy(&hostname, dry_run, force)?;
 
             if dry_run {
@@ -141,14 +188,59 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
-        Commands::Undeploy => {
-            let state_dir = dotm_state_dir();
+        Commands::Restore { system, package, dry_run } => {
+            let state_dir = if system {
+                check_system_privileges();
+                system_state_dir()
+            } else {
+                dotm_state_dir()
+            };
+            let state = dotm::state::DeployState::load(&state_dir)?;
+
+            if state.entries().is_empty() {
+                println!("No files currently managed by dotm.");
+                return Ok(());
+            }
+
+            if dry_run {
+                let mut count = 0;
+                for entry in state.entries() {
+                    if let Some(ref filter) = package {
+                        if entry.package != *filter {
+                            continue;
+                        }
+                    }
+                    if entry.original_hash.is_some() {
+                        println!("  restore {}", entry.target.display());
+                    } else {
+                        println!("  remove  {}", entry.target.display());
+                    }
+                    count += 1;
+                }
+                println!("Dry run — would restore {} files.", count);
+            } else {
+                let restored = state.restore(package.as_deref())?;
+                println!("Restored {} files.", restored);
+            }
+        }
+        Commands::Undeploy { system } => {
+            let state_dir = if system {
+                check_system_privileges();
+                system_state_dir()
+            } else {
+                dotm_state_dir()
+            };
             let state = dotm::state::DeployState::load(&state_dir)?;
             let removed = state.undeploy()?;
             println!("Removed {removed} managed files.");
         }
-        Commands::Status { verbose, short, package } => {
-            let state_dir = dotm_state_dir();
+        Commands::Status { verbose, short, package, system } => {
+            let state_dir = if system {
+                check_system_privileges();
+                system_state_dir()
+            } else {
+                dotm_state_dir()
+            };
             let state = dotm::state::DeployState::load(&state_dir)?;
             let entries = state.entries();
 
@@ -216,8 +308,13 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
-        Commands::Diff { path } => {
-            let state_dir = dotm_state_dir();
+        Commands::Diff { path, system } => {
+            let state_dir = if system {
+                check_system_privileges();
+                system_state_dir()
+            } else {
+                dotm_state_dir()
+            };
             let state = dotm::state::DeployState::load(&state_dir)?;
             let mut found_diffs = false;
 
@@ -229,7 +326,7 @@ fn main() -> anyhow::Result<()> {
                 }
 
                 let status = state.check_entry_status(entry);
-                if status != dotm::state::FileStatus::Modified {
+                if !status.is_modified() {
                     continue;
                 }
 
@@ -237,7 +334,7 @@ fn main() -> anyhow::Result<()> {
 
                 let current = std::fs::read_to_string(&entry.staged).unwrap_or_default();
                 let original = state
-                    .load_original(&entry.content_hash)
+                    .load_deployed(&entry.content_hash)
                     .map(|b| String::from_utf8_lossy(&b).to_string())
                     .unwrap_or_else(|_| "(original not available)".to_string());
 
@@ -253,14 +350,19 @@ fn main() -> anyhow::Result<()> {
                 println!("No modified files.");
             }
         }
-        Commands::Adopt => {
-            let state_dir = dotm_state_dir();
+        Commands::Adopt { system } => {
+            let state_dir = if system {
+                check_system_privileges();
+                system_state_dir()
+            } else {
+                dotm_state_dir()
+            };
             let state = dotm::state::DeployState::load(&state_dir)?;
             let mut adopted_count = 0;
 
             for entry in state.entries() {
                 let status = state.check_entry_status(entry);
-                if status != dotm::state::FileStatus::Modified {
+                if !status.is_modified() {
                     continue;
                 }
 
@@ -274,7 +376,7 @@ fn main() -> anyhow::Result<()> {
 
                 let current = std::fs::read_to_string(&entry.staged)?;
                 let original = state
-                    .load_original(&entry.content_hash)
+                    .load_deployed(&entry.content_hash)
                     .map(|b| String::from_utf8_lossy(&b).to_string())?;
 
                 let file_label = entry.target.to_str().unwrap_or("unknown");
@@ -369,6 +471,9 @@ fn main() -> anyhow::Result<()> {
             if let Err(e) = dotm::resolver::resolve_packages(root, &all_pkgs) {
                 errors.push(format!("dependency resolution error: {}", e));
             }
+
+            // Validate system package configuration
+            errors.extend(dotm::config::validate_system_packages(root));
 
             if errors.is_empty() {
                 println!("Configuration is valid.");
@@ -470,6 +575,7 @@ fn main() -> anyhow::Result<()> {
             host,
             no_push,
             force,
+            system,
         } => {
             let git_repo = dotm::git::GitRepo::open(&cli.dir).ok_or_else(|| {
                 anyhow::anyhow!("dotfiles directory is not a git repository")
@@ -517,8 +623,22 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             });
 
-            let state_dir = dotm_state_dir();
-            let mut orch = Orchestrator::new(&cli.dir, &target_dir)?.with_state_dir(&state_dir);
+            let state_dir = if system {
+                check_system_privileges();
+                system_state_dir()
+            } else {
+                dotm_state_dir()
+            };
+
+            let mut orch = Orchestrator::new(&cli.dir, &target_dir)?
+                .with_state_dir(&state_dir)
+                .with_system_mode(system);
+
+            if system && !orch.loader().root().packages.values().any(|p| p.system) {
+                println!("no system packages configured");
+                return Ok(());
+            }
+
             let report = orch.deploy(&hostname, false, force)?;
 
             if !report.created.is_empty() {
@@ -564,4 +684,15 @@ fn dotm_state_dir() -> PathBuf {
     dirs::state_dir()
         .unwrap_or_else(|| dirs::home_dir().unwrap().join(".local/state"))
         .join("dotm")
+}
+
+fn system_state_dir() -> PathBuf {
+    PathBuf::from("/var/lib/dotm")
+}
+
+fn check_system_privileges() {
+    if nix::unistd::geteuid().as_raw() != 0 {
+        eprintln!("error: system packages require root privileges — run with sudo");
+        std::process::exit(1);
+    }
 }
