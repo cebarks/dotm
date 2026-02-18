@@ -1,6 +1,6 @@
 [package]
 name = "dotm-rs"
-version = "0.2.1"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.87"
 description = "Dotfile manager with composable roles, templates, and host-specific overrides"
@@ -37,4 +37,6 @@ similar = "2"
 toml = "1"
 
 [dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
 tempfile = "3"

@@ -72,6 +72,8 @@ packages/
             └── init.lua
 ```
 
+Target paths support environment variable expansion (`$HOME`, `$XDG_CONFIG_HOME`, `~`, etc.). Undefined variables produce an error at deploy time.
+
 Packages are declared in `dotm.toml`:
 
 ```toml
@@ -79,7 +81,7 @@ Packages are declared in `dotm.toml`:
 description = "Editor configuration"
 depends = ["shell"]       # always pulled in
 suggests = ["theme"]      # informational only
-target = "/"              # override deploy target (default: ~)
+target = "$XDG_CONFIG_HOME"  # supports ~, $VAR, ${VAR}
 strategy = "copy"         # "stage" (default) or "copy"
 ```
 
@@ -224,6 +226,45 @@ For each file, each metadata field (owner, group, mode) is resolved independentl
 
 The default behavior is to preserve. Setting metadata is always opt-in.
 
+## Hooks
+
+Packages can define shell commands to run before and after deploy/undeploy operations:
+
+```toml
+[packages.shell]
+description = "Shell configuration"
+pre_deploy = "echo 'deploying shell configs...'"
+post_deploy = "source ~/.bashrc"
+pre_undeploy = "echo 'removing shell configs...'"
+post_undeploy = ""
+```
+
+- Commands run via `sh -c` with the package's target directory as the working directory
+- Environment variables `DOTM_PACKAGE`, `DOTM_TARGET`, and `DOTM_ACTION` are set
+- `pre_*` hook failure aborts the operation for that package; `post_*` failures are warnings
+- Hooks are skipped during `--dry-run`
+
+## Orphan Detection
+
+When files are removed from a package or a package is removed from a role, previously deployed files become "orphans." dotm detects these on deploy and warns about them:
+
+```bash
+Warning: 2 orphaned files (no longer managed):
+  ? /home/user/.config/old.conf
+  ? /home/user/.config/removed.conf
+Run 'dotm prune' to clean up, or set auto_prune = true in dotm.toml.
+```
+
+To automatically remove orphans on every deploy:
+
+```toml
+[dotm]
+target = "~"
+auto_prune = true
+```
+
+Or run `dotm prune` manually to clean up.
+
 ## System Packages
 
 dotm can deploy configuration files to system locations like `/etc/`. System packages are deployed separately from user packages, under root privileges.
@@ -306,18 +347,22 @@ Options:
   -V, --version     Print version
 
 Commands:
-  deploy     Deploy configs for the current host
-  undeploy   Remove all managed symlinks and copies
-  restore    Restore files to their pre-dotm state
-  status     Show deployment status
-  diff       Show diffs for files modified since last deploy
-  adopt      Interactively adopt changes back into source
-  check      Validate configuration
-  init       Initialize a new package
-  commit     Commit all changes in the dotfiles repo
-  push       Push dotfiles repo to remote
-  pull       Pull dotfiles repo from remote
-  sync       Pull, deploy, and optionally push in one step
+  deploy        Deploy configs for the current host
+  undeploy      Remove all managed symlinks and copies
+  restore       Restore files to their pre-dotm state
+  status        Show deployment status
+  diff          Show diffs for files modified since last deploy
+  adopt         Interactively adopt changes back into source
+  check         Validate configuration
+  init          Initialize a new package
+  add           Add existing files to a package
+  list          List available packages, roles, or hosts
+  prune         Remove orphaned files no longer managed by any package
+  completions   Generate shell completions
+  commit        Commit all changes in the dotfiles repo
+  push          Push dotfiles repo to remote
+  pull          Pull dotfiles repo from remote
+  sync          Pull, deploy, and optionally push in one step
 ```
 
 ### deploy
@@ -327,6 +372,7 @@ dotm deploy                    # deploy for current hostname
 dotm deploy --host dev-server  # deploy for a specific host
 dotm deploy --dry-run          # show what would be done
 dotm deploy --force            # overwrite modified/unmanaged files
+dotm deploy --package shell    # deploy only this package (and deps)
 dotm deploy --system           # deploy system packages (requires root)
 ```
 
@@ -334,6 +380,7 @@ dotm deploy --system           # deploy system packages (requires root)
 
 ```bash
 dotm undeploy                  # remove all managed files
+dotm undeploy --package shell  # undeploy only this package
 dotm undeploy --system         # remove managed system files
 ```
 
@@ -386,6 +433,46 @@ Validates package dependencies, host/role references, system package requirement
 
 ```bash
 dotm init mypackage            # create packages/mypackage/
+```
+
+### add
+
+```bash
+dotm add shell ~/.bashrc       # move file into the shell package
+dotm add shell ~/.bashrc ~/.bash_profile  # add multiple files
+dotm add shell ~/.bashrc --force          # overwrite existing in package
+```
+
+Moves existing files into a package directory and prints a summary. Run `dotm deploy` afterward to create symlinks back to the original locations.
+
+### list
+
+```bash
+dotm list packages             # list all packages
+dotm list packages -v          # with details (depends, strategy, etc.)
+dotm list roles                # list all roles
+dotm list roles -v             # with included packages
+dotm list hosts                # list all hosts
+dotm list hosts -v             # with assigned roles
+dotm list hosts --tree         # show host → role → package hierarchy
+```
+
+### prune
+
+```bash
+dotm prune                     # remove orphaned files
+dotm prune --dry-run           # show what would be pruned
+dotm prune --system            # prune system package orphans
+```
+
+### completions
+
+```bash
+dotm completions bash          # generate bash completions
+dotm completions zsh           # generate zsh completions
+dotm completions fish          # generate fish completions
+eval "$(dotm completions bash)"          # source directly
+dotm completions zsh > ~/.zfunc/_dotm    # save to file
 ```
 
 ### commit / push / pull / sync
