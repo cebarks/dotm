@@ -62,7 +62,7 @@ target = "/"
 #[test]
 fn parse_host_config() {
     let toml_str = r#"
-hostname = "relativity"
+hostname = "testhost"
 roles = ["desktop", "gaming", "dev"]
 
 [vars]
@@ -71,7 +71,7 @@ display.refresh_rate = 120
 gpu.vendor = "amd"
 "#;
     let config: HostConfig = toml::from_str(toml_str).unwrap();
-    assert_eq!(config.hostname, "relativity");
+    assert_eq!(config.hostname, "testhost");
     assert_eq!(config.roles, vec!["desktop", "gaming", "dev"]);
 
     let display = config.vars.get("display").unwrap().as_table().unwrap();
