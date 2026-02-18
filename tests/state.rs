@@ -4,6 +4,59 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 #[test]
+fn state_save_includes_version() {
+    let dir = TempDir::new().unwrap();
+    let mut state = DeployState::new(dir.path());
+    state.record(DeployEntry {
+        target: PathBuf::from("/home/user/.bashrc"),
+        staged: PathBuf::from("/staged/.bashrc"),
+        source: PathBuf::from("/source/.bashrc"),
+        content_hash: "abc".to_string(),
+        original_hash: None,
+        kind: EntryKind::Base,
+        package: "shell".to_string(),
+        owner: None,
+        group: None,
+        mode: None,
+        original_owner: None,
+        original_group: None,
+        original_mode: None,
+    });
+    state.save().unwrap();
+
+    let raw = std::fs::read_to_string(dir.path().join("dotm-state.json")).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(parsed["version"], 2);
+}
+
+#[test]
+fn state_loads_unversioned_as_v1_and_migrates() {
+    let dir = TempDir::new().unwrap();
+    let v1_json = r#"{"entries":[]}"#;
+    std::fs::create_dir_all(dir.path()).unwrap();
+    std::fs::write(dir.path().join("dotm-state.json"), v1_json).unwrap();
+
+    let state = DeployState::load(dir.path()).unwrap();
+    assert!(state.entries().is_empty());
+    state.save().unwrap();
+    let raw = std::fs::read_to_string(dir.path().join("dotm-state.json")).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(parsed["version"], 2);
+}
+
+#[test]
+fn state_errors_on_future_version() {
+    let dir = TempDir::new().unwrap();
+    let future_json = r#"{"version":999,"entries":[]}"#;
+    std::fs::create_dir_all(dir.path()).unwrap();
+    std::fs::write(dir.path().join("dotm-state.json"), future_json).unwrap();
+
+    let result = DeployState::load(dir.path());
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("newer version"));
+}
+
+#[test]
 fn save_and_load_new_state() {
     let dir = TempDir::new().unwrap();
     let mut state = DeployState::new(dir.path());

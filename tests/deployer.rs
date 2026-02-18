@@ -164,7 +164,7 @@ fn stage_force_overwrites_unmanaged_file() {
     };
 
     let result = deploy_staged(&action, staging_dir.path(), target_dir.path(), false, true, None).unwrap();
-    assert!(matches!(result, DeployResult::Created));
+    assert!(matches!(result, DeployResult::Updated));
 
     // Staged file should exist
     let staged = staging_dir.path().join("conflict.conf");
@@ -217,4 +217,51 @@ fn apply_permission_override_sets_mode() {
     // Invalid octal string should error
     let err = apply_permission_override(&file_path, "xyz");
     assert!(err.is_err());
+}
+
+#[test]
+fn deploy_staged_returns_updated_when_replacing_symlink() {
+    let staging_dir = TempDir::new().unwrap();
+    let target_dir = TempDir::new().unwrap();
+    let source_dir = TempDir::new().unwrap();
+
+    let source_path = source_dir.path().join("test.conf");
+    std::fs::write(&source_path, "content").unwrap();
+
+    let action = FileAction {
+        source: source_path,
+        target_rel_path: PathBuf::from("test.conf"),
+        kind: EntryKind::Base,
+    };
+
+    // First deploy — should be Created
+    let result = deploy_staged(&action, staging_dir.path(), target_dir.path(), false, false, None).unwrap();
+    assert!(matches!(result, DeployResult::Created));
+
+    // Second deploy — target is now a symlink, should be Updated
+    let result = deploy_staged(&action, staging_dir.path(), target_dir.path(), false, false, None).unwrap();
+    assert!(matches!(result, DeployResult::Updated));
+}
+
+#[test]
+fn deploy_copy_returns_updated_when_replacing_file() {
+    let target_dir = TempDir::new().unwrap();
+    let source_dir = TempDir::new().unwrap();
+
+    let source_path = source_dir.path().join("test.conf");
+    std::fs::write(&source_path, "content").unwrap();
+
+    let action = FileAction {
+        source: source_path,
+        target_rel_path: PathBuf::from("test.conf"),
+        kind: EntryKind::Base,
+    };
+
+    // First deploy — should be Created
+    let result = deploy_copy(&action, target_dir.path(), false, false, None).unwrap();
+    assert!(matches!(result, DeployResult::Created));
+
+    // Second deploy — target already exists, should be Updated
+    let result = deploy_copy(&action, target_dir.path(), false, true, None).unwrap();
+    assert!(matches!(result, DeployResult::Updated));
 }

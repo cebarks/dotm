@@ -56,9 +56,12 @@ impl FileStatus {
 }
 
 const STATE_FILE: &str = "dotm-state.json";
+const CURRENT_VERSION: u32 = 2;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct DeployState {
+    #[serde(default)]
+    version: u32,
     #[serde(skip)]
     state_dir: PathBuf,
     entries: Vec<DeployEntry>,
@@ -91,6 +94,7 @@ pub struct DeployEntry {
 impl DeployState {
     pub fn new(state_dir: &Path) -> Self {
         Self {
+            version: CURRENT_VERSION,
             state_dir: state_dir.to_path_buf(),
             ..Default::default()
         }
@@ -106,6 +110,15 @@ impl DeployState {
             .with_context(|| format!("failed to read state file: {}", path.display()))?;
         let mut state: DeployState = serde_json::from_str(&content)
             .with_context(|| format!("failed to parse state file: {}", path.display()))?;
+        if state.version > CURRENT_VERSION {
+            anyhow::bail!(
+                "state file was created by a newer version of dotm (state version {}, max supported {})",
+                state.version, CURRENT_VERSION
+            );
+        }
+        if state.version < CURRENT_VERSION {
+            state.version = CURRENT_VERSION;
+        }
         state.state_dir = state_dir.to_path_buf();
         Ok(state)
     }

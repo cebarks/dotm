@@ -154,7 +154,7 @@ impl Orchestrator {
 
             let pkg_target = if let Some(pkg_config) = self.loader.root().packages.get(pkg_name) {
                 if let Some(ref target) = pkg_config.target {
-                    PathBuf::from(shellexpand_tilde(target))
+                    PathBuf::from(expand_path(target, Some(&format!("package '{pkg_name}'")))?)
                 } else {
                     self.target_dir.clone()
                 }
@@ -339,7 +339,11 @@ impl Orchestrator {
                                 original_mode,
                             });
 
-                            report.created.push(target_path.clone());
+                            if matches!(result, DeployResult::Updated) {
+                                report.updated.push(target_path.clone());
+                            } else {
+                                report.created.push(target_path.clone());
+                            }
                         }
                         DeployResult::Conflict(msg) => {
                             report.conflicts.push((target_path, msg));
@@ -468,7 +472,11 @@ impl Orchestrator {
                                 original_mode,
                             });
 
-                            report.created.push(target_path);
+                            if matches!(result, DeployResult::Updated) {
+                                report.updated.push(target_path);
+                            } else {
+                                report.created.push(target_path);
+                            }
                         }
                         DeployResult::Conflict(msg) => {
                             report.conflicts.push((target_path, msg));
@@ -506,11 +514,16 @@ impl Orchestrator {
     }
 }
 
-fn shellexpand_tilde(path: &str) -> String {
-    if (path.starts_with("~/") || path == "~")
-        && let Ok(home) = std::env::var("HOME")
-    {
-        return path.replacen('~', &home, 1);
-    }
-    path.to_string()
+/// Expand shell variables and tilde in a path string.
+/// Errors if a referenced environment variable is not defined.
+pub fn expand_path(path: &str, context: Option<&str>) -> Result<String> {
+    shellexpand::full(path)
+        .map(|s| s.into_owned())
+        .map_err(|e| {
+            if let Some(ctx) = context {
+                anyhow::anyhow!("{ctx}: {e}")
+            } else {
+                anyhow::anyhow!("path expansion failed: {e}")
+            }
+        })
 }

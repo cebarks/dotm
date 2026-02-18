@@ -32,6 +32,9 @@ pub fn deploy_staged(
         return Ok(DeployResult::DryRun);
     }
 
+    // Check if the target already exists (managed symlink or file) before removing
+    let was_existing = target_path.is_symlink() || target_path.exists();
+
     // Handle conflicts on the target path
     if target_path.exists() || target_path.is_symlink() {
         if target_path.is_symlink() {
@@ -78,7 +81,11 @@ pub fn deploy_staged(
     std::os::unix::fs::symlink(&abs_staged, &target_path)
         .with_context(|| format!("failed to create symlink: {} -> {}", target_path.display(), abs_staged.display()))?;
 
-    Ok(DeployResult::Created)
+    if was_existing {
+        Ok(DeployResult::Updated)
+    } else {
+        Ok(DeployResult::Created)
+    }
 }
 
 /// Deploy a file action by copying directly to the target directory (no staging).
@@ -97,6 +104,9 @@ pub fn deploy_copy(
     if dry_run {
         return Ok(DeployResult::DryRun);
     }
+
+    // Check if the target already exists before removing
+    let was_existing = target_path.is_symlink() || target_path.exists();
 
     // Handle conflicts on the target path
     if target_path.exists() || target_path.is_symlink() {
@@ -133,7 +143,11 @@ pub fn deploy_copy(
         }
     }
 
-    Ok(DeployResult::Created)
+    if was_existing {
+        Ok(DeployResult::Updated)
+    } else {
+        Ok(DeployResult::Created)
+    }
 }
 
 /// Parse an octal mode string (e.g. "755") and apply it to the file at `path`.
