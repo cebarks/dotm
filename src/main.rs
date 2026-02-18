@@ -357,47 +357,63 @@ fn main() -> anyhow::Result<()> {
             } else {
                 dotm_state_dir()
             };
-            let state = dotm::state::DeployState::load_locked(&state_dir)?;
+            let mut state = dotm::state::DeployState::load_locked(&state_dir)?;
             let mut adopted_count = 0;
+            let num_entries = state.entries().len();
 
-            for entry in state.entries() {
-                let status = state.check_entry_status(entry);
-                if !status.is_modified() {
+            for idx in 0..num_entries {
+                let (is_modified, is_template, staged, source, target, content_hash) = {
+                    let entry = &state.entries()[idx];
+                    let status = state.check_entry_status(entry);
+                    (
+                        status.is_modified(),
+                        entry.kind == dotm::scanner::EntryKind::Template,
+                        entry.staged.clone(),
+                        entry.source.clone(),
+                        entry.target.clone(),
+                        entry.content_hash.clone(),
+                    )
+                };
+
+                if !is_modified {
                     continue;
                 }
 
-                if entry.kind == dotm::scanner::EntryKind::Template {
+                if is_template {
                     eprintln!(
                         "Skipping {} (template — changes must be manually applied to the .tera source)",
-                        entry.target.display()
+                        target.display()
                     );
                     continue;
                 }
 
-                let current = std::fs::read_to_string(&entry.staged)?;
+                let current = std::fs::read_to_string(&staged)?;
                 let original = state
-                    .load_deployed(&entry.content_hash)
+                    .load_deployed(&content_hash)
                     .map(|b| String::from_utf8_lossy(&b).to_string())?;
 
-                let file_label = entry.target.to_str().unwrap_or("unknown");
+                let file_label = target.to_str().unwrap_or("unknown");
                 match dotm::adopt::interactive_adopt(file_label, &original, &current)? {
                     Some(patched) => {
-                        std::fs::write(&entry.source, &patched)?;
-                        std::fs::write(&entry.staged, &patched)?;
+                        std::fs::write(&source, &patched)?;
+                        std::fs::write(&staged, &patched)?;
+
+                        let new_hash = dotm::hash::hash_content(patched.as_bytes());
+                        state.store_deployed(&new_hash, patched.as_bytes())?;
+                        state.update_entry_hash(idx, new_hash);
+
                         adopted_count += 1;
-                        println!("Adopted changes to {}", entry.source.display());
+                        println!("Adopted changes to {}", source.display());
                     }
                     None => {
-                        println!("Skipped {}", entry.target.display());
+                        println!("Skipped {}", target.display());
                     }
                 }
             }
 
             if adopted_count > 0 {
-                println!(
-                    "\nAdopted changes to {} file(s). Run 'dotm deploy' to re-sync state.",
-                    adopted_count
-                );
+                state.save()?;
+                println!("\nAdopted changes to {} file(s).", adopted_count);
             } else {
                 println!("No changes adopted.");
             }

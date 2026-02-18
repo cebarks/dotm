@@ -169,6 +169,16 @@ impl DeployState {
         &self.entries
     }
 
+    pub fn entries_mut(&mut self) -> &mut [DeployEntry] {
+        &mut self.entries
+    }
+
+    pub fn update_entry_hash(&mut self, index: usize, new_hash: String) {
+        if let Some(entry) = self.entries.get_mut(index) {
+            entry.content_hash = new_hash;
+        }
+    }
+
     pub fn check_entry_status(&self, entry: &DeployEntry) -> FileStatus {
         if !entry.target.exists() && !entry.target.is_symlink() {
             return FileStatus::missing();

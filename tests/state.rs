@@ -57,6 +57,29 @@ fn state_errors_on_future_version() {
 }
 
 #[test]
+fn update_entry_hash_changes_hash() {
+    let dir = TempDir::new().unwrap();
+    let mut state = DeployState::new(dir.path());
+    state.record(DeployEntry {
+        target: PathBuf::from("/t"),
+        staged: PathBuf::from("/s"),
+        source: PathBuf::from("/src"),
+        content_hash: "old_hash".to_string(),
+        original_hash: None,
+        kind: EntryKind::Base,
+        package: "test".to_string(),
+        owner: None,
+        group: None,
+        mode: None,
+        original_owner: None,
+        original_group: None,
+        original_mode: None,
+    });
+    state.update_entry_hash(0, "new_hash".to_string());
+    assert_eq!(state.entries()[0].content_hash, "new_hash");
+}
+
+#[test]
 fn save_and_load_new_state() {
     let dir = TempDir::new().unwrap();
     let mut state = DeployState::new(dir.path());
