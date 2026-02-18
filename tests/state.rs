@@ -1,5 +1,5 @@
 use dotm::scanner::EntryKind;
-use dotm::state::{DeployEntry, DeployState, FileStatus};
+use dotm::state::{DeployEntry, DeployState};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -12,16 +12,30 @@ fn save_and_load_new_state() {
         staged: PathBuf::from("/home/user/dotfiles/.staged/.bashrc"),
         source: PathBuf::from("/home/user/dotfiles/packages/shell/.bashrc"),
         content_hash: "abc123".to_string(),
+        original_hash: None,
         kind: EntryKind::Base,
         package: "shell".to_string(),
+        owner: None,
+        group: None,
+        mode: None,
+        original_owner: None,
+        original_group: None,
+        original_mode: None,
     });
     state.record(DeployEntry {
         target: PathBuf::from("/home/user/.config/app.conf"),
         staged: PathBuf::from("/home/user/dotfiles/.staged/.config/app.conf"),
         source: PathBuf::from("/home/user/dotfiles/packages/configs/.config/app.conf##host.myhost"),
         content_hash: "def456".to_string(),
+        original_hash: None,
         kind: EntryKind::Override,
         package: "configs".to_string(),
+        owner: None,
+        group: None,
+        mode: None,
+        original_owner: None,
+        original_group: None,
+        original_mode: None,
     });
     state.save().unwrap();
 
@@ -60,8 +74,15 @@ fn undeploy_removes_target_and_staged() {
         staged: staged_path.clone(),
         source: PathBuf::from("irrelevant"),
         content_hash: "hash".to_string(),
+        original_hash: None,
         kind: EntryKind::Base,
         package: "shell".to_string(),
+        owner: None,
+        group: None,
+        mode: None,
+        original_owner: None,
+        original_group: None,
+        original_mode: None,
     });
     state.save().unwrap();
 
@@ -91,15 +112,22 @@ fn check_entry_status_detects_modified() {
         staged: staged_path.clone(),
         source: PathBuf::from("irrelevant"),
         content_hash: original_hash,
+        original_hash: None,
         kind: EntryKind::Base,
         package: "test".to_string(),
+        owner: None,
+        group: None,
+        mode: None,
+        original_owner: None,
+        original_group: None,
+        original_mode: None,
     };
 
-    assert_eq!(state.check_entry_status(&entry), FileStatus::Ok);
+    assert!(state.check_entry_status(&entry).is_ok());
 
     // Modify the staged file
     std::fs::write(&staged_path, "modified content").unwrap();
-    assert_eq!(state.check_entry_status(&entry), FileStatus::Modified);
+    assert!(state.check_entry_status(&entry).is_modified());
 }
 
 #[test]
@@ -112,11 +140,18 @@ fn check_entry_status_detects_missing() {
         staged: PathBuf::from("/nonexistent/staged"),
         source: PathBuf::from("irrelevant"),
         content_hash: "hash".to_string(),
+        original_hash: None,
         kind: EntryKind::Base,
         package: "test".to_string(),
+        owner: None,
+        group: None,
+        mode: None,
+        original_owner: None,
+        original_group: None,
+        original_mode: None,
     };
 
-    assert_eq!(state.check_entry_status(&entry), FileStatus::Missing);
+    assert!(state.check_entry_status(&entry).is_missing());
 }
 
 #[test]
@@ -141,8 +176,15 @@ fn undeploy_cleans_empty_staged_directories() {
         staged: staged_path.clone(),
         source: PathBuf::from("irrelevant"),
         content_hash: "hash".to_string(),
+        original_hash: None,
         kind: EntryKind::Base,
         package: "test".to_string(),
+        owner: None,
+        group: None,
+        mode: None,
+        original_owner: None,
+        original_group: None,
+        original_mode: None,
     });
     state.save().unwrap();
 

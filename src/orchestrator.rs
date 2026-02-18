@@ -2,6 +2,7 @@ use crate::config::DeployStrategy;
 use crate::deployer::{self, DeployResult};
 use crate::hash;
 use crate::loader::ConfigLoader;
+use crate::metadata;
 use crate::resolver;
 use crate::scanner;
 use crate::state::{DeployEntry, DeployState};
@@ -18,6 +19,7 @@ pub struct Orchestrator {
     target_dir: PathBuf,
     state_dir: Option<PathBuf>,
     staging_dir: PathBuf,
+    system_mode: bool,
 }
 
 #[derive(Debug, Default)]
@@ -46,6 +48,7 @@ impl Orchestrator {
             target_dir: target_dir.to_path_buf(),
             state_dir: None,
             staging_dir,
+            system_mode: false,
         })
     }
 
@@ -54,13 +57,22 @@ impl Orchestrator {
         self
     }
 
+    pub fn with_system_mode(mut self, system: bool) -> Self {
+        self.system_mode = system;
+        self
+    }
+
+    pub fn loader(&self) -> &ConfigLoader {
+        &self.loader
+    }
+
     fn get_pkg_strategy(&self, pkg_name: &str) -> DeployStrategy {
         self.loader
             .root()
             .packages
             .get(pkg_name)
-            .map(|c| c.strategy)
-            .unwrap_or_default()
+            .and_then(|c| c.strategy)
+            .unwrap_or(DeployStrategy::Stage)
     }
 
     pub fn deploy(&mut self, hostname: &str, dry_run: bool, force: bool) -> Result<DeployReport> {
@@ -70,6 +82,15 @@ impl Orchestrator {
             .as_ref()
             .map(|d| DeployState::new(d))
             .unwrap_or_default();
+
+        let effective_staging_dir = if self.system_mode {
+            self.state_dir
+                .as_ref()
+                .map(|d| d.join(".staged"))
+                .unwrap_or_else(|| self.staging_dir.clone())
+        } else {
+            self.staging_dir.clone()
+        };
 
         // 1. Load host config
         let host = self
@@ -111,6 +132,18 @@ impl Orchestrator {
         let mut pending: Vec<PendingAction> = Vec::new();
 
         for pkg_name in &resolved {
+            // Filter packages based on system mode
+            let is_system = self
+                .loader
+                .root()
+                .packages
+                .get(pkg_name)
+                .map(|c| c.system)
+                .unwrap_or(false);
+            if self.system_mode != is_system {
+                continue;
+            }
+
             let pkg_dir = packages_dir.join(pkg_name);
             if !pkg_dir.is_dir() {
                 eprintln!("warning: package directory not found: {}", pkg_dir.display());
@@ -154,7 +187,7 @@ impl Orchestrator {
         let mut staging_owners: HashMap<PathBuf, String> = HashMap::new();
         for p in &pending {
             if p.strategy == DeployStrategy::Stage {
-                let staging_path = self.staging_dir.join(&p.action.target_rel_path);
+                let staging_path = effective_staging_dir.join(&p.action.target_rel_path);
                 if let Some(existing) = staging_owners.get(&staging_path) {
                     bail!(
                         "staging collision -- packages '{}' and '{}' both deploy {}",
@@ -187,7 +220,7 @@ impl Orchestrator {
 
             match p.strategy {
                 DeployStrategy::Stage => {
-                    let staged_path = self.staging_dir.join(&p.action.target_rel_path);
+                    let staged_path = effective_staging_dir.join(&p.action.target_rel_path);
 
                     // Drift detection: if staged file exists and was modified since last deploy
                     if staged_path.exists()
@@ -206,9 +239,22 @@ impl Orchestrator {
                             }
                         }
 
+                    // Backup pre-existing file content and metadata before deploying
+                    let (original_hash, original_owner, original_group, original_mode) =
+                        if !dry_run && target_path.exists() && !target_path.is_symlink() {
+                            let content = std::fs::read(&target_path)?;
+                            let hash = hash::hash_content(&content);
+                            state.store_original(&hash, &content)?;
+
+                            let (owner, group, mode) = metadata::read_file_metadata(&target_path)?;
+                            (Some(hash), Some(owner), Some(group), Some(mode))
+                        } else {
+                            (None, None, None, None)
+                        };
+
                     let result = deployer::deploy_staged(
                         &p.action,
-                        &self.staging_dir,
+                        &effective_staging_dir,
                         &p.pkg_target,
                         dry_run,
                         force,
@@ -225,8 +271,54 @@ impl Orchestrator {
 
                             if !dry_run && self.state_dir.is_some() {
                                 let content = std::fs::read(&staged_path)?;
-                                state.store_original(&content_hash, &content)?;
+                                state.store_deployed(&content_hash, &content)?;
                             }
+
+                            // Resolve and apply metadata
+                            let resolved = if !dry_run {
+                                if let Some(pkg_config) = self.loader.root().packages.get(&p.pkg_name) {
+                                    let rel_path_str = p.action.target_rel_path.to_str().unwrap_or("");
+                                    let resolved = metadata::resolve_metadata(pkg_config, rel_path_str);
+
+                                    if resolved.owner.is_some() || resolved.group.is_some() {
+                                        if let Err(e) = metadata::apply_ownership(
+                                            &staged_path,
+                                            resolved.owner.as_deref(),
+                                            resolved.group.as_deref(),
+                                        ) {
+                                            eprintln!("warning: failed to set ownership on {}: {e}", staged_path.display());
+                                        }
+                                    }
+
+                                    if let Some(ref mode) = resolved.mode {
+                                        deployer::apply_permission_override(&staged_path, mode)?;
+                                    }
+
+                                    resolved
+                                } else {
+                                    metadata::resolve_metadata(
+                                        &crate::config::PackageConfig::default(),
+                                        "",
+                                    )
+                                }
+                            } else {
+                                metadata::resolve_metadata(
+                                    &crate::config::PackageConfig {
+                                        description: None,
+                                        depends: vec![],
+                                        suggests: vec![],
+                                        target: None,
+                                        strategy: None,
+                                        system: false,
+                                        owner: None,
+                                        group: None,
+                                        permissions: Default::default(),
+                                        ownership: Default::default(),
+                                        preserve: Default::default(),
+                                    },
+                                    "",
+                                )
+                            };
 
                             let abs_source = std::fs::canonicalize(&p.action.source)
                                 .unwrap_or_else(|_| p.action.source.clone());
@@ -236,8 +328,15 @@ impl Orchestrator {
                                 staged: staged_path.clone(),
                                 source: abs_source,
                                 content_hash,
+                                original_hash,
                                 kind: p.action.kind,
                                 package: p.pkg_name.clone(),
+                                owner: resolved.owner,
+                                group: resolved.group,
+                                mode: resolved.mode,
+                                original_owner,
+                                original_group,
+                                original_mode,
                             });
 
                             report.created.push(target_path.clone());
@@ -250,20 +349,39 @@ impl Orchestrator {
                         }
                         _ => {}
                     }
-
-                    // Apply permission overrides if configured
-                    if !dry_run
-                        && let Some(pkg_config) = self.loader.root().packages.get(&p.pkg_name) {
-                            let rel_path_str =
-                                p.action.target_rel_path.to_str().unwrap_or("");
-                            if let Some(mode) = pkg_config.permissions.get(rel_path_str) {
-                                let staged_perm_path =
-                                    self.staging_dir.join(&p.action.target_rel_path);
-                                deployer::apply_permission_override(&staged_perm_path, mode)?;
-                            }
-                        }
                 }
                 DeployStrategy::Copy => {
+                    // Drift detection: if target exists and was modified since last deploy
+                    if target_path.exists() {
+                        if let Some(&expected_hash) = existing_hashes.get(&target_path) {
+                            let current_hash = hash::hash_file(&target_path)?;
+                            if current_hash != expected_hash && !force {
+                                eprintln!(
+                                    "warning: {} has been modified since last deploy, skipping (use --force to overwrite)",
+                                    p.action.target_rel_path.display()
+                                );
+                                report.conflicts.push((
+                                    target_path,
+                                    "modified since last deploy".to_string(),
+                                ));
+                                continue;
+                            }
+                        }
+                    }
+
+                    // Backup pre-existing file content and metadata before deploying
+                    let (original_hash, original_owner, original_group, original_mode) =
+                        if !dry_run && target_path.exists() && !target_path.is_symlink() {
+                            let content = std::fs::read(&target_path)?;
+                            let hash = hash::hash_content(&content);
+                            state.store_original(&hash, &content)?;
+
+                            let (owner, group, mode) = metadata::read_file_metadata(&target_path)?;
+                            (Some(hash), Some(owner), Some(group), Some(mode))
+                        } else {
+                            (None, None, None, None)
+                        };
+
                     let result = deployer::deploy_copy(
                         &p.action,
                         &p.pkg_target,
@@ -282,8 +400,54 @@ impl Orchestrator {
 
                             if !dry_run && self.state_dir.is_some() {
                                 let content = std::fs::read(&target_path)?;
-                                state.store_original(&content_hash, &content)?;
+                                state.store_deployed(&content_hash, &content)?;
                             }
+
+                            // Resolve and apply metadata
+                            let resolved = if !dry_run {
+                                if let Some(pkg_config) = self.loader.root().packages.get(&p.pkg_name) {
+                                    let rel_path_str = p.action.target_rel_path.to_str().unwrap_or("");
+                                    let resolved = metadata::resolve_metadata(pkg_config, rel_path_str);
+
+                                    if resolved.owner.is_some() || resolved.group.is_some() {
+                                        if let Err(e) = metadata::apply_ownership(
+                                            &target_path,
+                                            resolved.owner.as_deref(),
+                                            resolved.group.as_deref(),
+                                        ) {
+                                            eprintln!("warning: failed to set ownership on {}: {e}", target_path.display());
+                                        }
+                                    }
+
+                                    if let Some(ref mode) = resolved.mode {
+                                        deployer::apply_permission_override(&target_path, mode)?;
+                                    }
+
+                                    resolved
+                                } else {
+                                    metadata::resolve_metadata(
+                                        &crate::config::PackageConfig::default(),
+                                        "",
+                                    )
+                                }
+                            } else {
+                                metadata::resolve_metadata(
+                                    &crate::config::PackageConfig {
+                                        description: None,
+                                        depends: vec![],
+                                        suggests: vec![],
+                                        target: None,
+                                        strategy: None,
+                                        system: false,
+                                        owner: None,
+                                        group: None,
+                                        permissions: Default::default(),
+                                        ownership: Default::default(),
+                                        preserve: Default::default(),
+                                    },
+                                    "",
+                                )
+                            };
 
                             let abs_source = std::fs::canonicalize(&p.action.source)
                                 .unwrap_or_else(|_| p.action.source.clone());
@@ -293,8 +457,15 @@ impl Orchestrator {
                                 staged: target_path.clone(), // for copy strategy, staged = target
                                 source: abs_source,
                                 content_hash,
+                                original_hash,
                                 kind: p.action.kind,
                                 package: p.pkg_name.clone(),
+                                owner: resolved.owner,
+                                group: resolved.group,
+                                mode: resolved.mode,
+                                original_owner,
+                                original_group,
+                                original_mode,
                             });
 
                             report.created.push(target_path);
@@ -316,8 +487,8 @@ impl Orchestrator {
             state.save()?;
         }
 
-        // Warn if .staged/ is not in .gitignore
-        if !dry_run {
+        // Warn if .staged/ is not in .gitignore (only relevant for user-mode)
+        if !dry_run && !self.system_mode {
             let gitignore_path = self.loader.base_dir().join(".gitignore");
             let staged_ignored = if gitignore_path.exists() {
                 std::fs::read_to_string(&gitignore_path)
