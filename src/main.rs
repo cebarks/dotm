@@ -513,7 +513,10 @@ fn main() -> anyhow::Result<()> {
                     let entry = entry?;
                     let path = entry.path();
                     if path.extension().and_then(|e| e.to_str()) == Some("toml") {
-                        let stem = path.file_stem().unwrap().to_str().unwrap();
+                        let stem = path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .expect("invalid host filename");
                         match loader.load_host(stem) {
                             Ok(host) => {
                                 for role_name in &host.roles {
@@ -957,7 +960,8 @@ fn main() -> anyhow::Result<()> {
 
 fn dotm_state_dir() -> PathBuf {
     dirs::state_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap().join(".local/state"))
+        .or_else(|| dirs::home_dir().map(|h| h.join(".local/state")))
+        .expect("could not determine state directory; set XDG_STATE_HOME")
         .join("dotm")
 }
 

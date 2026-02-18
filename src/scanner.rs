@@ -59,7 +59,10 @@ fn collect_files(
         if path.is_dir() {
             collect_files(base, &path, files)?;
         } else {
-            let rel_path = path.strip_prefix(base).unwrap().to_path_buf();
+            let rel_path = path
+                .strip_prefix(base)
+                .expect("collected path must be under base directory")
+                .to_path_buf();
             let canonical = canonical_target_path(&rel_path);
             files.entry(canonical).or_default().push(path);
         }
@@ -67,9 +70,17 @@ fn collect_files(
     Ok(())
 }
 
+/// Extract filename as a UTF-8 string, panicking with a descriptive message on non-UTF-8 paths.
+fn file_name_str(path: &Path) -> &str {
+    path.file_name()
+        .expect("path has no filename")
+        .to_str()
+        .expect("filename is not valid UTF-8")
+}
+
 /// Strip `##` suffix and `.tera` extension to get the canonical target path.
 fn canonical_target_path(rel_path: &Path) -> PathBuf {
-    let file_name = rel_path.file_name().unwrap().to_str().unwrap();
+    let file_name = file_name_str(rel_path);
 
     // Strip ## suffix first
     let base_name = if let Some(idx) = file_name.find("##") {
@@ -104,7 +115,7 @@ fn resolve_variant(
     // Priority 1: host override
     if let Some(source) = variants
         .iter()
-        .find(|v| v.file_name().unwrap().to_str().unwrap().contains(&host_suffix))
+        .find(|v| file_name_str(v).contains(&host_suffix))
     {
         return FileAction {
             source: source.clone(),
@@ -118,7 +129,7 @@ fn resolve_variant(
         let role_suffix = format!("##role.{role}");
         if let Some(source) = variants
             .iter()
-            .find(|v| v.file_name().unwrap().to_str().unwrap().contains(&role_suffix))
+            .find(|v| file_name_str(v).contains(&role_suffix))
         {
             return FileAction {
                 source: source.clone(),
@@ -130,7 +141,7 @@ fn resolve_variant(
 
     // Priority 3: template (base file with .tera extension)
     if let Some(source) = variants.iter().find(|v| {
-        let name = v.file_name().unwrap().to_str().unwrap();
+        let name = file_name_str(v);
         name.ends_with(".tera") && !name.contains("##")
     }) {
         return FileAction {
@@ -144,7 +155,7 @@ fn resolve_variant(
     let source = variants
         .iter()
         .find(|v| {
-            let name = v.file_name().unwrap().to_str().unwrap();
+            let name = file_name_str(v);
             !name.contains("##") && !name.ends_with(".tera")
         })
         .unwrap_or(&variants[0]);
