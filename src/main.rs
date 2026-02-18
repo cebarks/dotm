@@ -82,6 +82,11 @@ enum Commands {
         /// Package name
         name: String,
     },
+    /// List available packages, roles, or hosts
+    List {
+        #[command(subcommand)]
+        what: ListWhat,
+    },
     /// Commit all changes in the dotfiles repository
     Commit {
         /// Commit message (auto-generated if not provided)
@@ -130,6 +135,31 @@ enum Commands {
         /// Operate on system packages (requires root)
         #[arg(long)]
         system: bool,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum ListWhat {
+    /// List packages
+    Packages {
+        /// Show details (depends, strategy, etc.)
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// List roles
+    Roles {
+        /// Show included packages
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// List hosts
+    Hosts {
+        /// Show assigned roles
+        #[arg(short, long)]
+        verbose: bool,
+        /// Show host → role → package tree
+        #[arg(long)]
+        tree: bool,
     },
 }
 
@@ -549,6 +579,24 @@ fn main() -> anyhow::Result<()> {
             std::fs::create_dir_all(&pkg_dir)?;
             println!("Created package: {}", pkg_dir.display());
             println!("Add files mirroring their home directory structure.");
+        }
+        Commands::List { what } => {
+            let loader = dotm::loader::ConfigLoader::new(&cli.dir)?;
+            match what {
+                ListWhat::Packages { verbose } => {
+                    print!("{}", dotm::list::render_packages(loader.root(), verbose));
+                }
+                ListWhat::Roles { verbose } => {
+                    print!("{}", dotm::list::render_roles(&loader, verbose)?);
+                }
+                ListWhat::Hosts { verbose, tree } => {
+                    if tree {
+                        print!("{}", dotm::list::render_tree(&loader)?);
+                    } else {
+                        print!("{}", dotm::list::render_hosts(&loader, verbose)?);
+                    }
+                }
+            }
         }
         Commands::Commit { message } => {
             let git_repo = dotm::git::GitRepo::open(&cli.dir).ok_or_else(|| {
