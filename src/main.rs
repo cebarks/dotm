@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use dotm::orchestrator::Orchestrator;
 use std::path::PathBuf;
 
@@ -111,6 +111,11 @@ enum Commands {
     Push,
     /// Pull dotfiles repository from remote
     Pull,
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        shell: clap_complete::Shell,
+    },
     /// Restore files to their pre-dotm state
     Restore {
         /// Restore only system packages
@@ -752,6 +757,10 @@ fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
             }
+        }
+        Commands::Completions { shell } => {
+            let mut cmd = Cli::command();
+            clap_complete::generate(shell, &mut cmd, "dotm", &mut std::io::stdout());
         }
         Commands::Prune {
             host,
