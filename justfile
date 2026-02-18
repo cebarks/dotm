@@ -21,3 +21,18 @@ check:
 # Install to ~/.cargo/bin
 install:
     cargo install --path .
+
+# Tag and push a release (e.g. `just release 0.2.0`)
+release VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! echo "{{VERSION}}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+        echo "error: VERSION must be semver (e.g. 1.2.3)" >&2
+        exit 1
+    fi
+    sed -i 's/^version = ".*"/version = "{{VERSION}}"/' Cargo.toml
+    cargo check --quiet
+    git add Cargo.toml Cargo.lock
+    git commit -m "release v{{VERSION}}"
+    git tag "v{{VERSION}}"
+    git push && git push --tags
