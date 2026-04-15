@@ -1,14 +1,13 @@
-use dotm::deployer::{apply_permission_override, deploy_copy, deploy_staged, DeployResult};
+use dotm::deployer::{apply_permission_override, deploy_copy, deploy_symlink, DeployResult};
 use dotm::scanner::{EntryKind, FileAction};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
-// --- deploy_staged tests ---
+// --- deploy_symlink tests ---
 
 #[test]
-fn stage_base_file_copies_to_staging_and_symlinks_target() {
-    let staging_dir = TempDir::new().unwrap();
+fn symlink_base_file_to_source() {
     let target_dir = TempDir::new().unwrap();
     let source_dir = TempDir::new().unwrap();
 
@@ -16,32 +15,159 @@ fn stage_base_file_copies_to_staging_and_symlinks_target() {
     std::fs::write(&source_path, "base config content").unwrap();
 
     let action = FileAction {
+        source: source_path.clone(),
+        target_rel_path: PathBuf::from(".config/app.conf"),
+        kind: EntryKind::Base,
+    };
+
+    let result = deploy_symlink(&action, target_dir.path(), false, false).unwrap();
+    assert!(matches!(result, DeployResult::Created));
+
+    // Target should be a symlink pointing directly to the source
+    let target = target_dir.path().join(".config/app.conf");
+    assert!(target.is_symlink());
+    assert_eq!(
+        std::fs::read_link(&target).unwrap(),
+        std::fs::canonicalize(&source_path).unwrap()
+    );
+
+    // Content should match source
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "base config content");
+}
+
+#[test]
+fn symlink_replaces_existing_symlink() {
+    let target_dir = TempDir::new().unwrap();
+    let source_dir = TempDir::new().unwrap();
+
+    let source_path = source_dir.path().join("test.conf");
+    std::fs::write(&source_path, "content").unwrap();
+
+    let action = FileAction {
+        source: source_path,
+        target_rel_path: PathBuf::from("test.conf"),
+        kind: EntryKind::Base,
+    };
+
+    // First deploy — should be Created
+    let result = deploy_symlink(&action, target_dir.path(), false, false).unwrap();
+    assert!(matches!(result, DeployResult::Created));
+
+    // Second deploy — should be Updated
+    let result = deploy_symlink(&action, target_dir.path(), false, false).unwrap();
+    assert!(matches!(result, DeployResult::Updated));
+
+    // Target should still be a symlink
+    let target = target_dir.path().join("test.conf");
+    assert!(target.is_symlink());
+}
+
+#[test]
+fn symlink_conflicts_with_unmanaged_regular_file() {
+    let target_dir = TempDir::new().unwrap();
+    let source_dir = TempDir::new().unwrap();
+
+    // Place an unmanaged regular file at the target path
+    std::fs::write(target_dir.path().join("conflict.conf"), "I was here first").unwrap();
+
+    let source_path = source_dir.path().join("conflict.conf");
+    std::fs::write(&source_path, "new content").unwrap();
+
+    let action = FileAction {
+        source: source_path,
+        target_rel_path: PathBuf::from("conflict.conf"),
+        kind: EntryKind::Base,
+    };
+
+    let result = deploy_symlink(&action, target_dir.path(), false, false).unwrap();
+    assert!(matches!(result, DeployResult::Conflict(_)));
+
+    // Original file should still exist
+    let target = target_dir.path().join("conflict.conf");
+    assert!(target.exists());
+    assert!(!target.is_symlink());
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "I was here first");
+}
+
+#[test]
+fn symlink_force_overwrites_regular_file() {
+    let target_dir = TempDir::new().unwrap();
+    let source_dir = TempDir::new().unwrap();
+
+    // Place an unmanaged regular file at the target path
+    std::fs::write(target_dir.path().join("conflict.conf"), "I was here first").unwrap();
+
+    let source_path = source_dir.path().join("conflict.conf");
+    std::fs::write(&source_path, "new content").unwrap();
+
+    let action = FileAction {
+        source: source_path.clone(),
+        target_rel_path: PathBuf::from("conflict.conf"),
+        kind: EntryKind::Base,
+    };
+
+    let result = deploy_symlink(&action, target_dir.path(), false, true).unwrap();
+    assert!(matches!(result, DeployResult::Updated));
+
+    // Target should now be a symlink to the source
+    let target = target_dir.path().join("conflict.conf");
+    assert!(target.is_symlink());
+    assert_eq!(
+        std::fs::read_link(&target).unwrap(),
+        std::fs::canonicalize(&source_path).unwrap()
+    );
+}
+
+#[test]
+fn symlink_errors_on_directory_target() {
+    let target_dir = TempDir::new().unwrap();
+    let source_dir = TempDir::new().unwrap();
+
+    // Create a directory at the target path
+    std::fs::create_dir_all(target_dir.path().join(".config")).unwrap();
+
+    let source_path = source_dir.path().join("app.conf");
+    std::fs::write(&source_path, "content").unwrap();
+
+    let action = FileAction {
+        source: source_path,
+        target_rel_path: PathBuf::from(".config"),
+        kind: EntryKind::Base,
+    };
+
+    let result = deploy_symlink(&action, target_dir.path(), false, false).unwrap();
+    match result {
+        DeployResult::Conflict(msg) => {
+            assert!(msg.contains("directory"), "expected 'directory' in error message, got: {}", msg);
+        }
+        _ => panic!("expected Conflict result for directory target"),
+    }
+}
+
+#[test]
+fn symlink_dry_run_creates_nothing() {
+    let target_dir = TempDir::new().unwrap();
+    let source_dir = TempDir::new().unwrap();
+
+    let source_path = source_dir.path().join("app.conf");
+    std::fs::write(&source_path, "some content").unwrap();
+
+    let action = FileAction {
         source: source_path,
         target_rel_path: PathBuf::from(".config/app.conf"),
         kind: EntryKind::Base,
     };
 
-    let result = deploy_staged(&action, staging_dir.path(), target_dir.path(), false, false, None).unwrap();
-    assert!(matches!(result, DeployResult::Created));
+    let result = deploy_symlink(&action, target_dir.path(), true, false).unwrap();
+    assert!(matches!(result, DeployResult::DryRun));
 
-    // Staged file should be a real file with the right content
-    let staged = staging_dir.path().join(".config/app.conf");
-    assert!(staged.exists());
-    assert!(!staged.is_symlink());
-    assert_eq!(std::fs::read_to_string(&staged).unwrap(), "base config content");
-
-    // Target should be a symlink pointing to the staged file
-    let target = target_dir.path().join(".config/app.conf");
-    assert!(target.is_symlink());
-    assert_eq!(
-        std::fs::read_link(&target).unwrap(),
-        std::fs::canonicalize(&staged).unwrap()
-    );
+    assert!(!target_dir.path().join(".config/app.conf").exists(), "dry run should not create target symlink");
 }
 
+// --- deploy_copy tests ---
+
 #[test]
-fn stage_template_renders_to_staging_and_symlinks_target() {
-    let staging_dir = TempDir::new().unwrap();
+fn copy_writes_rendered_template() {
     let target_dir = TempDir::new().unwrap();
     let source_dir = TempDir::new().unwrap();
 
@@ -55,27 +181,17 @@ fn stage_template_renders_to_staging_and_symlinks_target() {
     };
 
     let rendered = "rendered template output";
-    let result = deploy_staged(&action, staging_dir.path(), target_dir.path(), false, false, Some(rendered)).unwrap();
+    let result = deploy_copy(&action, target_dir.path(), false, false, Some(rendered)).unwrap();
     assert!(matches!(result, DeployResult::Created));
 
-    // Staged file should contain the rendered content
-    let staged = staging_dir.path().join(".config/app.conf");
-    assert!(staged.exists());
-    assert!(!staged.is_symlink());
-    assert_eq!(std::fs::read_to_string(&staged).unwrap(), "rendered template output");
-
-    // Target should be a symlink to the staged file
     let target = target_dir.path().join(".config/app.conf");
-    assert!(target.is_symlink());
-    assert_eq!(
-        std::fs::read_link(&target).unwrap(),
-        std::fs::canonicalize(&staged).unwrap()
-    );
+    assert!(target.exists());
+    assert!(!target.is_symlink(), "template should be a regular file, not a symlink");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "rendered template output");
 }
 
 #[test]
-fn stage_preserves_source_permissions() {
-    let staging_dir = TempDir::new().unwrap();
+fn copy_base_file_copies_from_source() {
     let target_dir = TempDir::new().unwrap();
     let source_dir = TempDir::new().unwrap();
 
@@ -89,96 +205,126 @@ fn stage_preserves_source_permissions() {
         kind: EntryKind::Base,
     };
 
-    let result = deploy_staged(&action, staging_dir.path(), target_dir.path(), false, false, None).unwrap();
+    let result = deploy_copy(&action, target_dir.path(), false, false, None).unwrap();
     assert!(matches!(result, DeployResult::Created));
 
-    let staged = staging_dir.path().join("script.sh");
-    let mode = std::fs::metadata(&staged).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o755, "staged file should preserve source permissions");
+    let target = target_dir.path().join("script.sh");
+    assert!(target.exists());
+    assert!(!target.is_symlink(), "deploy_copy should create a regular file, not a symlink");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "#!/bin/sh\necho hello");
+
+    // Check permissions were preserved
+    let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o755, "copy should preserve source permissions");
 }
 
 #[test]
-fn copy_strategy_copies_directly_to_target() {
+fn copy_errors_on_directory_target() {
     let target_dir = TempDir::new().unwrap();
     let source_dir = TempDir::new().unwrap();
 
+    // Create a directory at the target path
+    std::fs::create_dir_all(target_dir.path().join(".config")).unwrap();
+
     let source_path = source_dir.path().join("app.conf");
-    std::fs::write(&source_path, "copy strategy content").unwrap();
+    std::fs::write(&source_path, "content").unwrap();
 
     let action = FileAction {
         source: source_path,
-        target_rel_path: PathBuf::from(".config/app.conf"),
+        target_rel_path: PathBuf::from(".config"),
         kind: EntryKind::Base,
     };
 
     let result = deploy_copy(&action, target_dir.path(), false, false, None).unwrap();
-    assert!(matches!(result, DeployResult::Created));
-
-    let target = target_dir.path().join(".config/app.conf");
-    assert!(target.exists());
-    assert!(!target.is_symlink(), "deploy_copy should create a real file, not a symlink");
-    assert_eq!(std::fs::read_to_string(&target).unwrap(), "copy strategy content");
+    match result {
+        DeployResult::Conflict(msg) => {
+            assert!(msg.contains("directory"), "expected 'directory' in error message, got: {}", msg);
+        }
+        _ => panic!("expected Conflict result for directory target"),
+    }
 }
 
 #[test]
-fn stage_detects_conflict_with_unmanaged_file() {
-    let staging_dir = TempDir::new().unwrap();
+fn copy_replaces_existing_symlink() {
     let target_dir = TempDir::new().unwrap();
     let source_dir = TempDir::new().unwrap();
 
-    // Place an unmanaged real file at the target path
-    std::fs::write(target_dir.path().join("conflict.conf"), "I was here first").unwrap();
+    // Create a symlink at the target path (pointing to something else)
+    let dummy_file = source_dir.path().join("dummy");
+    std::fs::write(&dummy_file, "dummy content").unwrap();
+    let target_path = target_dir.path().join("test.conf");
+    std::os::unix::fs::symlink(&dummy_file, &target_path).unwrap();
 
-    let source_path = source_dir.path().join("conflict.conf");
+    let source_path = source_dir.path().join("test.conf");
     std::fs::write(&source_path, "new content").unwrap();
 
     let action = FileAction {
         source: source_path,
-        target_rel_path: PathBuf::from("conflict.conf"),
+        target_rel_path: PathBuf::from("test.conf"),
         kind: EntryKind::Base,
     };
 
-    let result = deploy_staged(&action, staging_dir.path(), target_dir.path(), false, false, None).unwrap();
-    assert!(matches!(result, DeployResult::Conflict(_)));
-
-    // Nothing should have been staged
-    assert!(!staging_dir.path().join("conflict.conf").exists());
-}
-
-#[test]
-fn stage_force_overwrites_unmanaged_file() {
-    let staging_dir = TempDir::new().unwrap();
-    let target_dir = TempDir::new().unwrap();
-    let source_dir = TempDir::new().unwrap();
-
-    // Place an unmanaged real file at the target path
-    std::fs::write(target_dir.path().join("conflict.conf"), "I was here first").unwrap();
-
-    let source_path = source_dir.path().join("conflict.conf");
-    std::fs::write(&source_path, "new content").unwrap();
-
-    let action = FileAction {
-        source: source_path,
-        target_rel_path: PathBuf::from("conflict.conf"),
-        kind: EntryKind::Base,
-    };
-
-    let result = deploy_staged(&action, staging_dir.path(), target_dir.path(), false, true, None).unwrap();
+    let result = deploy_copy(&action, target_dir.path(), false, false, None).unwrap();
     assert!(matches!(result, DeployResult::Updated));
 
-    // Staged file should exist
-    let staged = staging_dir.path().join("conflict.conf");
-    assert!(staged.exists());
-    assert_eq!(std::fs::read_to_string(&staged).unwrap(), "new content");
-
-    // Target should be a symlink to the staged file
-    let target = target_dir.path().join("conflict.conf");
-    assert!(target.is_symlink());
+    // Target should now be a regular file (not symlink)
+    assert!(!target_path.is_symlink());
+    assert_eq!(std::fs::read_to_string(&target_path).unwrap(), "new content");
 }
 
 #[test]
-fn stage_dry_run_creates_nothing() {
-    let staging_dir = TempDir::new().unwrap();
+fn copy_conflicts_with_unmanaged_regular_file() {
+    let target_dir = TempDir::new().unwrap();
+    let source_dir = TempDir::new().unwrap();
+
+    // Place an unmanaged regular file at the target path
+    std::fs::write(target_dir.path().join("conflict.conf"), "I was here first").unwrap();
+
+    let source_path = source_dir.path().join("conflict.conf");
+    std::fs::write(&source_path, "new content").unwrap();
+
+    let action = FileAction {
+        source: source_path,
+        target_rel_path: PathBuf::from("conflict.conf"),
+        kind: EntryKind::Base,
+    };
+
+    let result = deploy_copy(&action, target_dir.path(), false, false, None).unwrap();
+    assert!(matches!(result, DeployResult::Conflict(_)));
+
+    // Original file should still exist
+    let target = target_dir.path().join("conflict.conf");
+    assert!(target.exists());
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "I was here first");
+}
+
+#[test]
+fn copy_force_overwrites_regular_file() {
+    let target_dir = TempDir::new().unwrap();
+    let source_dir = TempDir::new().unwrap();
+
+    // Place an unmanaged regular file at the target path
+    std::fs::write(target_dir.path().join("conflict.conf"), "I was here first").unwrap();
+
+    let source_path = source_dir.path().join("conflict.conf");
+    std::fs::write(&source_path, "new content").unwrap();
+
+    let action = FileAction {
+        source: source_path,
+        target_rel_path: PathBuf::from("conflict.conf"),
+        kind: EntryKind::Base,
+    };
+
+    let result = deploy_copy(&action, target_dir.path(), false, true, None).unwrap();
+    assert!(matches!(result, DeployResult::Updated));
+
+    // Target should now contain new content
+    let target = target_dir.path().join("conflict.conf");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "new content");
+}
+
+#[test]
+fn copy_dry_run_creates_nothing() {
     let target_dir = TempDir::new().unwrap();
     let source_dir = TempDir::new().unwrap();
 
@@ -191,12 +337,13 @@ fn stage_dry_run_creates_nothing() {
         kind: EntryKind::Base,
     };
 
-    let result = deploy_staged(&action, staging_dir.path(), target_dir.path(), true, false, None).unwrap();
+    let result = deploy_copy(&action, target_dir.path(), true, false, None).unwrap();
     assert!(matches!(result, DeployResult::DryRun));
 
-    assert!(!staging_dir.path().join(".config/app.conf").exists(), "dry run should not create staged file");
-    assert!(!target_dir.path().join(".config/app.conf").exists(), "dry run should not create target symlink");
+    assert!(!target_dir.path().join(".config/app.conf").exists(), "dry run should not create target file");
 }
+
+// --- apply_permission_override tests ---
 
 #[test]
 fn apply_permission_override_sets_mode() {
@@ -217,51 +364,4 @@ fn apply_permission_override_sets_mode() {
     // Invalid octal string should error
     let err = apply_permission_override(&file_path, "xyz");
     assert!(err.is_err());
-}
-
-#[test]
-fn deploy_staged_returns_updated_when_replacing_symlink() {
-    let staging_dir = TempDir::new().unwrap();
-    let target_dir = TempDir::new().unwrap();
-    let source_dir = TempDir::new().unwrap();
-
-    let source_path = source_dir.path().join("test.conf");
-    std::fs::write(&source_path, "content").unwrap();
-
-    let action = FileAction {
-        source: source_path,
-        target_rel_path: PathBuf::from("test.conf"),
-        kind: EntryKind::Base,
-    };
-
-    // First deploy — should be Created
-    let result = deploy_staged(&action, staging_dir.path(), target_dir.path(), false, false, None).unwrap();
-    assert!(matches!(result, DeployResult::Created));
-
-    // Second deploy — target is now a symlink, should be Updated
-    let result = deploy_staged(&action, staging_dir.path(), target_dir.path(), false, false, None).unwrap();
-    assert!(matches!(result, DeployResult::Updated));
-}
-
-#[test]
-fn deploy_copy_returns_updated_when_replacing_file() {
-    let target_dir = TempDir::new().unwrap();
-    let source_dir = TempDir::new().unwrap();
-
-    let source_path = source_dir.path().join("test.conf");
-    std::fs::write(&source_path, "content").unwrap();
-
-    let action = FileAction {
-        source: source_path,
-        target_rel_path: PathBuf::from("test.conf"),
-        kind: EntryKind::Base,
-    };
-
-    // First deploy — should be Created
-    let result = deploy_copy(&action, target_dir.path(), false, false, None).unwrap();
-    assert!(matches!(result, DeployResult::Created));
-
-    // Second deploy — target already exists, should be Updated
-    let result = deploy_copy(&action, target_dir.path(), false, true, None).unwrap();
-    assert!(matches!(result, DeployResult::Updated));
 }
