@@ -105,9 +105,12 @@ fn cli_status_no_state() {
     let state_dir = TempDir::new().unwrap();
     copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
 
-    // Override XDG_STATE_HOME so status doesn't pick up the real user's state
+    // Override HOME and XDG_STATE_HOME so status doesn't pick up the real user's state.
+    // HOME is needed because dotm checks ~/.dotm/ before the XDG_STATE_HOME fallback.
+    let fake_home = TempDir::new().unwrap();
     Command::cargo_bin("dotm")
         .unwrap()
+        .env("HOME", fake_home.path())
         .env("XDG_STATE_HOME", state_dir.path())
         .args(["-d", dotfiles.path().to_str().unwrap(), "status"])
         .assert()
