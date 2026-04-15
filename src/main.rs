@@ -941,12 +941,38 @@ fn dotm_state_dir() -> PathBuf {
         .join("dotm");
 
     if legacy.join("dotm-state.json").exists() {
-        eprintln!("note: reading state from legacy location; run 'dotm deploy' to migrate to ~/.dotm/");
-        return legacy;
+        match migrate_state_dir(&legacy, &dotm_dir) {
+            Ok(()) => {
+                eprintln!(
+                    "note: migrated state from {} to {}",
+                    legacy.display(),
+                    dotm_dir.display()
+                );
+                return dotm_dir;
+            }
+            Err(e) => {
+                eprintln!("warning: could not migrate state to {}: {e}", dotm_dir.display());
+                return legacy;
+            }
+        }
     }
 
     // Default to new location
     dotm_dir
+}
+
+fn migrate_state_dir(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let dest = to.join(entry.file_name());
+        if !dest.exists() {
+            std::fs::rename(entry.path(), &dest)?;
+        }
+    }
+    // Remove legacy dir if now empty
+    let _ = std::fs::remove_dir(from);
+    Ok(())
 }
 
 fn system_state_dir() -> PathBuf {
