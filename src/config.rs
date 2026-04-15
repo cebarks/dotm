@@ -58,17 +58,10 @@ pub struct PackageConfig {
 pub fn validate_system_packages(root: &RootConfig) -> Vec<String> {
     let mut errors = Vec::new();
     for (name, pkg) in &root.packages {
-        if pkg.system {
-            if pkg.target.is_none() {
-                errors.push(format!(
-                    "system package '{name}' must specify a target directory"
-                ));
-            }
-            if pkg.strategy.is_none() {
-                errors.push(format!(
-                    "system package '{name}' must specify a deployment strategy"
-                ));
-            }
+        if pkg.system && pkg.target.is_none() {
+            errors.push(format!(
+                "system package '{name}' must specify a target directory"
+            ));
         }
         // Validate ownership format
         for (path, value) in &pkg.ownership {
@@ -116,6 +109,18 @@ pub fn validate_system_packages(root: &RootConfig) -> Vec<String> {
     errors
 }
 
+pub fn deprecated_strategy_warnings(root: &RootConfig) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for (name, pkg) in &root.packages {
+        if pkg.strategy.is_some() {
+            warnings.push(format!(
+                "warning: 'strategy' field on package '{name}' is deprecated and ignored; deployment mode is now determined automatically"
+            ));
+        }
+    }
+    warnings
+}
+
 #[derive(Debug, Deserialize)]
 pub struct HostConfig {
     pub hostname: String,
@@ -129,4 +134,68 @@ pub struct RoleConfig {
     pub packages: Vec<String>,
     #[serde(default)]
     pub vars: Map<String, Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_system_packages_does_not_require_strategy() {
+        let toml_str = r#"
+[dotm]
+target = "~"
+
+[packages.sys]
+system = true
+target = "/etc/sys"
+"#;
+        let root: RootConfig = toml::from_str(toml_str).unwrap();
+        let errors = validate_system_packages(&root);
+        assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+    }
+
+    #[test]
+    fn strategy_field_still_parses() {
+        let toml_str = r#"
+[dotm]
+target = "~"
+
+[packages.sys]
+system = true
+target = "/etc/sys"
+strategy = "copy"
+"#;
+        let root: RootConfig = toml::from_str(toml_str).unwrap();
+        assert!(root.packages["sys"].strategy.is_some());
+    }
+
+    #[test]
+    fn deprecated_strategy_warning_emitted() {
+        let toml_str = r#"
+[dotm]
+target = "~"
+
+[packages.shell]
+strategy = "stage"
+"#;
+        let root: RootConfig = toml::from_str(toml_str).unwrap();
+        let warnings = deprecated_strategy_warnings(&root);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("shell"));
+        assert!(warnings[0].contains("deprecated"));
+    }
+
+    #[test]
+    fn no_deprecation_warning_without_strategy() {
+        let toml_str = r#"
+[dotm]
+target = "~"
+
+[packages.shell]
+"#;
+        let root: RootConfig = toml::from_str(toml_str).unwrap();
+        let warnings = deprecated_strategy_warnings(&root);
+        assert!(warnings.is_empty());
+    }
 }
