@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.1.1
+
+### Bug Fixes
+
+- Auto-migrate legacy state directory from `$XDG_STATE_HOME/dotm/` to `~/.dotm/` on first access, instead of only warning
+- Graceful fallback to legacy location if migration fails
+- Fixed `cli_status_no_state` test isolation
+
 ## 1.0.0
 
 Initial stable release.
