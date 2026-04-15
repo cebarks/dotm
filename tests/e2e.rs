@@ -2,7 +2,7 @@ use dotm::orchestrator::Orchestrator;
 use std::path::Path;
 use tempfile::TempDir;
 
-/// Copy a fixture directory to a temp dir so tests don't race on .staged/
+/// Copy a fixture directory to a temp dir for test isolation
 fn use_fixture(fixture: &str) -> TempDir {
     let tmp = TempDir::new().unwrap();
     let src = Path::new("tests/fixtures").join(fixture);
@@ -22,11 +22,11 @@ fn e2e_deploy_and_undeploy() {
     assert!(target.path().join(".bashrc").exists());
     assert!(target.path().join(".config/nvim/init.lua").exists());
 
-    // Symlink should point into .staged/, not packages/
+    // Symlink should point into packages/, not .staged/
     let bashrc_link = std::fs::read_link(target.path().join(".bashrc")).unwrap();
     assert!(
-        bashrc_link.to_str().unwrap().contains(".staged"),
-        "symlink should point into .staged/, got: {}",
+        bashrc_link.to_str().unwrap().contains("packages/"),
+        "symlink should point into packages/, got: {}",
         bashrc_link.display()
     );
 }
@@ -44,7 +44,7 @@ fn e2e_deploy_with_overrides() {
         "unexpected conflicts: {:?}",
         report.conflicts
     );
-    // app.conf is now a symlink (via staging), not a direct copy
+    // app.conf should be a symlink pointing to the override source in packages/
     let app_conf = target.path().join(".config/app.conf");
     assert!(app_conf.exists());
     assert!(app_conf.is_symlink());
@@ -67,10 +67,10 @@ fn e2e_deploy_with_template_rendering() {
 
     assert!(report.conflicts.is_empty());
 
-    // templated.conf is now a symlink (via staging), content still readable through it
+    // templated.conf should be a regular file (copy), not a symlink
     let templated = target.path().join(".config/templated.conf");
     assert!(templated.exists());
-    assert!(templated.is_symlink());
+    assert!(!templated.is_symlink(), "template should be a copy, not a symlink");
     let content = std::fs::read_to_string(&templated).unwrap();
     assert!(
         content.contains("blue"),
@@ -135,11 +135,15 @@ fn e2e_deploy_stages_all_files() {
 
     assert!(report.conflicts.is_empty());
 
-    // All target files should be symlinks pointing into .staged/
+    // All base target files should be symlinks pointing into packages/
     let bashrc = target.path().join(".bashrc");
     assert!(bashrc.is_symlink());
     let link = std::fs::read_link(&bashrc).unwrap();
-    assert!(link.to_str().unwrap().contains(".staged"));
+    assert!(
+        link.to_str().unwrap().contains("packages/"),
+        "symlink should point into packages/, got: {}",
+        link.display()
+    );
 
     // State should have entries with content hashes
     let state = dotm::state::DeployState::load(state_dir.path()).unwrap();
@@ -196,6 +200,7 @@ fn e2e_permission_override_applied() {
 
     let dotfiles_tmp = TempDir::new().unwrap();
 
+    // Use a system package so metadata/permissions are applied
     std::fs::write(
         dotfiles_tmp.path().join("dotm.toml"),
         r#"
@@ -204,6 +209,8 @@ target = "~"
 
 [packages.scripts]
 description = "Scripts"
+system = true
+target = "/tmp/e2e_perm_test"
 
 [packages.scripts.permissions]
 "bin/myscript" = "755"
@@ -229,20 +236,24 @@ description = "Scripts"
     )
     .unwrap();
 
-    let target = TempDir::new().unwrap();
+    let target_dir = Path::new("/tmp/e2e_perm_test");
     let state_dir = TempDir::new().unwrap();
-    let mut orch = Orchestrator::new(dotfiles_tmp.path(), target.path())
+    let mut orch = Orchestrator::new(dotfiles_tmp.path(), target_dir)
         .unwrap()
-        .with_state_dir(state_dir.path());
+        .with_state_dir(state_dir.path())
+        .with_system_mode(true);
     orch.deploy("testhost", false, false).unwrap();
 
-    let staged = dotfiles_tmp.path().join(".staged/bin/myscript");
-    let mode = staged.metadata().unwrap().permissions().mode();
+    let deployed = target_dir.join("bin/myscript");
+    let mode = deployed.metadata().unwrap().permissions().mode();
     assert_eq!(
         mode & 0o777,
         0o755,
-        "staged file should have 755 permissions"
+        "deployed file should have 755 permissions"
     );
+
+    // Clean up
+    let _ = std::fs::remove_dir_all(target_dir);
 }
 
 #[test]
@@ -291,27 +302,29 @@ fn e2e_deploy_status_clean_after_deploy() {
 #[test]
 fn e2e_deploy_detects_modification() {
     let target = TempDir::new().unwrap();
-    let dotfiles = use_fixture("basic");
+    let dotfiles = use_fixture("overrides");
     let state_dir = TempDir::new().unwrap();
 
     let mut orch = Orchestrator::new(dotfiles.path(), target.path())
         .unwrap()
         .with_state_dir(state_dir.path());
-    orch.deploy("testhost", false, false).unwrap();
+    orch.deploy("myhost", false, false).unwrap();
 
-    // Modify the staged .bashrc
-    let staged_bashrc = dotfiles.path().join(".staged/.bashrc");
-    std::fs::write(&staged_bashrc, "# modified externally").unwrap();
+    // Modify the deployed template (a copy, not a symlink)
+    let templated = target.path().join(".config/templated.conf");
+    assert!(templated.exists());
+    assert!(!templated.is_symlink(), "template should be a copy");
+    std::fs::write(&templated, "# modified externally").unwrap();
 
     // Check status — should detect modification
     let state = dotm::state::DeployState::load(state_dir.path()).unwrap();
-    let bashrc_entry = state
+    let entry = state
         .entries()
         .iter()
-        .find(|e| e.target.ends_with(".bashrc"))
+        .find(|e| e.target.ends_with("templated.conf"))
         .unwrap();
-    let status = state.check_entry_status(bashrc_entry);
-    assert!(status.is_modified(), "should detect modified .bashrc");
+    let status = state.check_entry_status(entry);
+    assert!(status.is_modified(), "should detect modified templated.conf");
 }
 
 #[test]

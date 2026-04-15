@@ -16,7 +16,6 @@ target = "~"
 description = "System service config"
 system = true
 target = "{system_target_str}"
-strategy = "copy"
 
 [packages.shell]
 description = "Shell config"
@@ -127,13 +126,12 @@ fn user_mode_skips_system_packages() {
 }
 
 #[test]
-fn system_deploy_uses_separate_staging() {
+fn system_deploy_copies_to_target() {
     let dotfiles = TempDir::new().unwrap();
     let target = TempDir::new().unwrap();
     let system_target = TempDir::new().unwrap();
     let state = TempDir::new().unwrap();
 
-    // Create a system package with stage strategy
     std::fs::write(
         dotfiles.path().join("dotm.toml"),
         format!(
@@ -144,7 +142,6 @@ target = "~"
 [packages.sysconfig]
 system = true
 target = "{}"
-strategy = "stage"
 "#,
             system_target.path().display()
         ),
@@ -153,7 +150,7 @@ strategy = "stage"
 
     let pkg_dir = dotfiles.path().join("packages/sysconfig/etc");
     std::fs::create_dir_all(&pkg_dir).unwrap();
-    std::fs::write(pkg_dir.join("test.conf"), "staged content").unwrap();
+    std::fs::write(pkg_dir.join("test.conf"), "system content").unwrap();
 
     let hosts_dir = dotfiles.path().join("hosts");
     std::fs::create_dir_all(&hosts_dir).unwrap();
@@ -184,7 +181,19 @@ packages = ["sysconfig"]
     let report = orch.deploy("testhost", false, false).unwrap();
     assert!(!report.created.is_empty());
 
-    // Staging should be in state dir, NOT in dotfiles dir
+    // System package should be deployed as a copy (not a symlink)
+    let deployed = system_target.path().join("etc/test.conf");
+    assert!(deployed.exists(), "system file should be deployed");
+    assert!(
+        !deployed.is_symlink(),
+        "system packages should be copies, not symlinks"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&deployed).unwrap(),
+        "system content"
+    );
+
+    // No .staged/ directory should be created anywhere
     let dotfiles_staged = dotfiles.path().join(".staged");
     assert!(
         !dotfiles_staged.exists()
@@ -192,12 +201,6 @@ packages = ["sysconfig"]
                 .unwrap()
                 .next()
                 .is_none(),
-        "system packages should not stage in the dotfiles .staged/ directory"
-    );
-
-    let state_staged = state.path().join(".staged");
-    assert!(
-        state_staged.exists(),
-        "system packages should stage in the state dir .staged/"
+        "no .staged/ directory should be created in the dotfiles dir"
     );
 }

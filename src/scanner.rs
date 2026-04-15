@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 /// What kind of entry a file action represents, determining how it gets deployed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EntryKind {
-    /// Plain base file — deployed as a symlink
+    /// Plain base file -- symlink (user-mode) or copy (system-mode)
     Base,
-    /// Host or role override — deployed as a copy
+    /// Host or role override -- symlink (user-mode) or copy (system-mode)
     Override,
     /// Tera template — rendered and written as a file
     Template,
