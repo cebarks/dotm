@@ -343,7 +343,7 @@ mod tests {
     fn make_entry(target: &str, package: &str, hash: &str) -> DeployEntry {
         DeployEntry {
             target: PathBuf::from(target),
-            staged: PathBuf::from(format!("/staged{target}")),
+            staged: None,
             source: PathBuf::from(format!("/source{target}")),
             content_hash: hash.to_string(),
             original_hash: None,

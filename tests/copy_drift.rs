@@ -16,7 +16,7 @@ fn copy_strategy_status_detects_drift() {
     let mut state = DeployState::new(state_dir.path());
     state.record(DeployEntry {
         target: target_path.clone(),
-        staged: target_path.clone(),
+        staged: None,
         source: PathBuf::from("/source/config.conf"),
         content_hash: original_hash,
         original_hash: None,
