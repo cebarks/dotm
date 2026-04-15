@@ -57,7 +57,7 @@ impl FileStatus {
 }
 
 const STATE_FILE: &str = "dotm-state.json";
-const CURRENT_VERSION: u32 = 2;
+const CURRENT_VERSION: u32 = 3;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct DeployState {
@@ -73,7 +73,8 @@ pub struct DeployState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeployEntry {
     pub target: PathBuf,
-    pub staged: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged: Option<PathBuf>,
     pub source: PathBuf,
     pub content_hash: String,
     #[serde(default)]
@@ -104,7 +105,14 @@ impl DeployState {
     }
 
     pub fn load(state_dir: &Path) -> Result<Self> {
-        Self::migrate_storage(state_dir)?;
+        // Only run v1->v2 storage migration for legacy state dirs (not ~/.dotm/)
+        let is_legacy = state_dir
+            .file_name()
+            .map(|n| n != ".dotm")
+            .unwrap_or(true);
+        if is_legacy {
+            Self::migrate_storage(state_dir)?;
+        }
         let path = state_dir.join(STATE_FILE);
         if !path.exists() {
             return Ok(Self::new(state_dir));
@@ -186,14 +194,45 @@ impl DeployState {
 
         let mut status = FileStatus::ok();
 
-        if entry.staged.exists() {
-            if let Ok(current_hash) = hash::hash_file(&entry.staged)
+        if entry.target.is_symlink() {
+            // Symlink path: check that it points to the expected source
+            let link_dest = match std::fs::read_link(&entry.target) {
+                Ok(dest) => dest,
+                Err(_) => return FileStatus::missing(),
+            };
+
+            let canon_link = std::fs::canonicalize(&link_dest)
+                .or_else(|_| std::fs::canonicalize(&entry.target))
+                .unwrap_or(link_dest.clone());
+            let canon_source = std::fs::canonicalize(&entry.source)
+                .unwrap_or_else(|_| entry.source.clone());
+
+            if canon_link == canon_source {
+                // Direct symlink to source — no content drift possible
+            } else if let Some(ref staged) = entry.staged {
+                // Transitional v2 compatibility: symlink points to staged path
+                let canon_staged = std::fs::canonicalize(staged)
+                    .unwrap_or_else(|_| staged.clone());
+                if canon_link == canon_staged {
+                    // v2 staged symlink — check hash for drift
+                    if let Ok(current_hash) = hash::hash_file(staged)
+                        && current_hash != entry.content_hash
+                    {
+                        status.content_modified = true;
+                    }
+                } else {
+                    return FileStatus::missing();
+                }
+            } else {
+                return FileStatus::missing();
+            }
+        } else {
+            // Regular file (copy/template): hash the target
+            if let Ok(current_hash) = hash::hash_file(&entry.target)
                 && current_hash != entry.content_hash
             {
                 status.content_modified = true;
             }
-        } else {
-            return FileStatus::missing();
         }
 
         // Metadata checks (only if we recorded what we set)
@@ -240,28 +279,6 @@ impl DeployState {
         let path = self.originals_dir().join(content_hash);
         std::fs::read(&path)
             .with_context(|| format!("failed to load original content: {}", path.display()))
-    }
-
-    pub fn deployed_dir(&self) -> PathBuf {
-        self.state_dir.join("deployed")
-    }
-
-    pub fn store_deployed(&self, content_hash: &str, content: &[u8]) -> Result<()> {
-        let dir = self.deployed_dir();
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("failed to create deployed directory: {}", dir.display()))?;
-        let path = dir.join(content_hash);
-        if !path.exists() {
-            std::fs::write(&path, content)
-                .with_context(|| format!("failed to store deployed content: {}", path.display()))?;
-        }
-        Ok(())
-    }
-
-    pub fn load_deployed(&self, content_hash: &str) -> Result<Vec<u8>> {
-        let path = self.deployed_dir().join(content_hash);
-        std::fs::read(&path)
-            .with_context(|| format!("failed to load deployed content: {}", path.display()))
     }
 
     pub fn migrate_storage(state_dir: &Path) -> Result<()> {
@@ -317,20 +334,10 @@ impl DeployState {
                 }
             }
 
-            // Clean up staged file if separate from target
-            if entry.staged != entry.target && entry.staged.exists() {
-                std::fs::remove_file(&entry.staged)
-                    .with_context(|| format!("failed to remove staged: {}", entry.staged.display()))?;
-                cleanup_empty_parents(&entry.staged);
-            }
         }
 
         // Clean up state directories if restoring everything (no package filter)
         if package_filter.is_none() {
-            let deployed = self.deployed_dir();
-            if deployed.is_dir() {
-                let _ = std::fs::remove_dir_all(&deployed);
-            }
             let originals = self.originals_dir();
             if originals.is_dir() {
                 let _ = std::fs::remove_dir_all(&originals);
@@ -358,11 +365,6 @@ impl DeployState {
                     removed += 1;
                 }
 
-                if entry.staged != entry.target && entry.staged.exists() {
-                    std::fs::remove_file(&entry.staged)
-                        .with_context(|| format!("failed to remove staged file: {}", entry.staged.display()))?;
-                    cleanup_empty_parents(&entry.staged);
-                }
             } else {
                 remaining.push(entry.clone());
             }
@@ -386,23 +388,12 @@ impl DeployState {
                 removed += 1;
             }
 
-            if entry.staged.exists() {
-                std::fs::remove_file(&entry.staged)
-                    .with_context(|| format!("failed to remove staged file: {}", entry.staged.display()))?;
-                cleanup_empty_parents(&entry.staged);
-            }
         }
 
         // Clean up originals directory
         let originals = self.originals_dir();
         if originals.is_dir() {
             let _ = std::fs::remove_dir_all(&originals);
-        }
-
-        // Clean up deployed directory
-        let deployed = self.deployed_dir();
-        if deployed.is_dir() {
-            let _ = std::fs::remove_dir_all(&deployed);
         }
 
         // Remove the state file itself
@@ -439,24 +430,6 @@ pub fn cleanup_empty_parents(path: &Path) {
 mod tests {
     use super::*;
     use tempfile::TempDir;
-
-    #[test]
-    fn deployed_dir_is_separate_from_originals() {
-        let dir = TempDir::new().unwrap();
-        let state = DeployState::new(dir.path());
-        assert_ne!(state.originals_dir(), state.deployed_dir());
-        assert!(state.originals_dir().ends_with("originals"));
-        assert!(state.deployed_dir().ends_with("deployed"));
-    }
-
-    #[test]
-    fn store_and_load_deployed_content() {
-        let dir = TempDir::new().unwrap();
-        let state = DeployState::new(dir.path());
-        state.store_deployed("abc123", b"deployed file content").unwrap();
-        let loaded = state.load_deployed("abc123").unwrap();
-        assert_eq!(loaded, b"deployed file content");
-    }
 
     #[test]
     fn store_and_load_original_content() {

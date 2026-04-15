@@ -24,9 +24,6 @@ pub fn render_packages(root: &RootConfig, verbose: bool) -> String {
             if let Some(ref target) = pkg.target {
                 out.push_str(&format!("  target: {target}\n"));
             }
-            if let Some(strategy) = pkg.strategy {
-                out.push_str(&format!("  strategy: {strategy:?}\n"));
-            }
             if pkg.system {
                 out.push_str("  system: true\n");
             }

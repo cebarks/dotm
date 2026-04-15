@@ -9,7 +9,7 @@ fn state_save_includes_version() {
     let mut state = DeployState::new(dir.path());
     state.record(DeployEntry {
         target: PathBuf::from("/home/user/.bashrc"),
-        staged: PathBuf::from("/staged/.bashrc"),
+        staged: None,
         source: PathBuf::from("/source/.bashrc"),
         content_hash: "abc".to_string(),
         original_hash: None,
@@ -26,7 +26,7 @@ fn state_save_includes_version() {
 
     let raw = std::fs::read_to_string(dir.path().join("dotm-state.json")).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
-    assert_eq!(parsed["version"], 2);
+    assert_eq!(parsed["version"], 3);
 }
 
 #[test]
@@ -41,7 +41,7 @@ fn state_loads_unversioned_as_v1_and_migrates() {
     state.save().unwrap();
     let raw = std::fs::read_to_string(dir.path().join("dotm-state.json")).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
-    assert_eq!(parsed["version"], 2);
+    assert_eq!(parsed["version"], 3);
 }
 
 #[test]
@@ -62,7 +62,7 @@ fn update_entry_hash_changes_hash() {
     let mut state = DeployState::new(dir.path());
     state.record(DeployEntry {
         target: PathBuf::from("/t"),
-        staged: PathBuf::from("/s"),
+        staged: None,
         source: PathBuf::from("/src"),
         content_hash: "old_hash".to_string(),
         original_hash: None,
@@ -85,7 +85,7 @@ fn save_and_load_new_state() {
     let mut state = DeployState::new(dir.path());
     state.record(DeployEntry {
         target: PathBuf::from("/home/user/.bashrc"),
-        staged: PathBuf::from("/home/user/dotfiles/.staged/.bashrc"),
+        staged: None,
         source: PathBuf::from("/home/user/dotfiles/packages/shell/.bashrc"),
         content_hash: "abc123".to_string(),
         original_hash: None,
@@ -100,7 +100,7 @@ fn save_and_load_new_state() {
     });
     state.record(DeployEntry {
         target: PathBuf::from("/home/user/.config/app.conf"),
-        staged: PathBuf::from("/home/user/dotfiles/.staged/.config/app.conf"),
+        staged: None,
         source: PathBuf::from("/home/user/dotfiles/packages/configs/.config/app.conf##host.myhost"),
         content_hash: "def456".to_string(),
         original_hash: None,
@@ -133,22 +133,22 @@ fn load_nonexistent_returns_empty() {
 }
 
 #[test]
-fn undeploy_removes_target_and_staged() {
+fn undeploy_removes_target() {
     let target_dir = TempDir::new().unwrap();
-    let staged_dir = TempDir::new().unwrap();
+    let source_dir = TempDir::new().unwrap();
 
-    let staged_path = staged_dir.path().join(".bashrc");
-    std::fs::write(&staged_path, "content").unwrap();
+    let source_path = source_dir.path().join(".bashrc");
+    std::fs::write(&source_path, "content").unwrap();
 
     let target_path = target_dir.path().join(".bashrc");
-    std::os::unix::fs::symlink(&staged_path, &target_path).unwrap();
+    std::os::unix::fs::symlink(&source_path, &target_path).unwrap();
 
     let state_dir = TempDir::new().unwrap();
     let mut state = DeployState::new(state_dir.path());
     state.record(DeployEntry {
         target: target_path.clone(),
-        staged: staged_path.clone(),
-        source: PathBuf::from("irrelevant"),
+        staged: None,
+        source: source_path.clone(),
         content_hash: "hash".to_string(),
         original_hash: None,
         kind: EntryKind::Base,
@@ -165,29 +165,63 @@ fn undeploy_removes_target_and_staged() {
     let removed = state.undeploy().unwrap();
     assert_eq!(removed, 1);
     assert!(!target_path.exists());
-    assert!(!staged_path.exists());
+    // Source should still exist (it's the dotfile source, not staged)
+    assert!(source_path.exists());
 }
 
 #[test]
-fn check_entry_status_detects_modified() {
-    let staged_dir = TempDir::new().unwrap();
+fn check_entry_status_detects_modified_copy() {
     let target_dir = TempDir::new().unwrap();
 
-    let staged_path = staged_dir.path().join("test.conf");
-    std::fs::write(&staged_path, "original content").unwrap();
+    let target_path = target_dir.path().join("test.conf");
+    std::fs::write(&target_path, "original content").unwrap();
     let original_hash = dotm::hash::hash_content(b"original content");
 
+    let state_dir = TempDir::new().unwrap();
+    let state = DeployState::new(state_dir.path());
+
+    let entry = DeployEntry {
+        target: target_path.clone(),
+        staged: None,
+        source: PathBuf::from("/source/test.conf"),
+        content_hash: original_hash,
+        original_hash: None,
+        kind: EntryKind::Template,
+        package: "test".to_string(),
+        owner: None,
+        group: None,
+        mode: None,
+        original_owner: None,
+        original_group: None,
+        original_mode: None,
+    };
+
+    assert!(state.check_entry_status(&entry).is_ok());
+
+    // Modify the target file
+    std::fs::write(&target_path, "modified content").unwrap();
+    assert!(state.check_entry_status(&entry).is_modified());
+}
+
+#[test]
+fn check_entry_status_symlink_ok_when_pointing_to_source() {
+    let source_dir = TempDir::new().unwrap();
+    let target_dir = TempDir::new().unwrap();
+
+    let source_path = source_dir.path().join("test.conf");
+    std::fs::write(&source_path, "content").unwrap();
+
     let target_path = target_dir.path().join("test.conf");
-    std::os::unix::fs::symlink(&staged_path, &target_path).unwrap();
+    std::os::unix::fs::symlink(&source_path, &target_path).unwrap();
 
     let state_dir = TempDir::new().unwrap();
     let state = DeployState::new(state_dir.path());
 
     let entry = DeployEntry {
         target: target_path,
-        staged: staged_path.clone(),
-        source: PathBuf::from("irrelevant"),
-        content_hash: original_hash,
+        staged: None,
+        source: source_path,
+        content_hash: dotm::hash::hash_content(b"content"),
         original_hash: None,
         kind: EntryKind::Base,
         package: "test".to_string(),
@@ -200,10 +234,43 @@ fn check_entry_status_detects_modified() {
     };
 
     assert!(state.check_entry_status(&entry).is_ok());
+}
 
-    // Modify the staged file
-    std::fs::write(&staged_path, "modified content").unwrap();
-    assert!(state.check_entry_status(&entry).is_modified());
+#[test]
+fn check_entry_status_symlink_missing_when_pointing_elsewhere() {
+    let source_dir = TempDir::new().unwrap();
+    let other_dir = TempDir::new().unwrap();
+    let target_dir = TempDir::new().unwrap();
+
+    let source_path = source_dir.path().join("test.conf");
+    std::fs::write(&source_path, "content").unwrap();
+
+    let other_path = other_dir.path().join("other.conf");
+    std::fs::write(&other_path, "other").unwrap();
+
+    let target_path = target_dir.path().join("test.conf");
+    std::os::unix::fs::symlink(&other_path, &target_path).unwrap();
+
+    let state_dir = TempDir::new().unwrap();
+    let state = DeployState::new(state_dir.path());
+
+    let entry = DeployEntry {
+        target: target_path,
+        staged: None,
+        source: source_path,
+        content_hash: dotm::hash::hash_content(b"content"),
+        original_hash: None,
+        kind: EntryKind::Base,
+        package: "test".to_string(),
+        owner: None,
+        group: None,
+        mode: None,
+        original_owner: None,
+        original_group: None,
+        original_mode: None,
+    };
+
+    assert!(state.check_entry_status(&entry).is_missing());
 }
 
 #[test]
@@ -213,7 +280,7 @@ fn check_entry_status_detects_missing() {
 
     let entry = DeployEntry {
         target: PathBuf::from("/nonexistent/target"),
-        staged: PathBuf::from("/nonexistent/staged"),
+        staged: None,
         source: PathBuf::from("irrelevant"),
         content_hash: "hash".to_string(),
         original_hash: None,
@@ -231,26 +298,24 @@ fn check_entry_status_detects_missing() {
 }
 
 #[test]
-fn undeploy_cleans_empty_staged_directories() {
-    let staged_dir = TempDir::new().unwrap();
+fn undeploy_cleans_empty_target_directories() {
+    let source_dir = TempDir::new().unwrap();
     let target_dir = TempDir::new().unwrap();
 
-    let staged_parent = staged_dir.path().join(".config/nested");
-    std::fs::create_dir_all(&staged_parent).unwrap();
-    let staged_path = staged_parent.join("file.conf");
-    std::fs::write(&staged_path, "content").unwrap();
+    let source_path = source_dir.path().join("file.conf");
+    std::fs::write(&source_path, "content").unwrap();
 
     let target_parent = target_dir.path().join(".config/nested");
     std::fs::create_dir_all(&target_parent).unwrap();
     let target_path = target_parent.join("file.conf");
-    std::os::unix::fs::symlink(&staged_path, &target_path).unwrap();
+    std::os::unix::fs::symlink(&source_path, &target_path).unwrap();
 
     let state_dir = TempDir::new().unwrap();
     let mut state = DeployState::new(state_dir.path());
     state.record(DeployEntry {
         target: target_path.clone(),
-        staged: staged_path.clone(),
-        source: PathBuf::from("irrelevant"),
+        staged: None,
+        source: source_path,
         content_hash: "hash".to_string(),
         original_hash: None,
         kind: EntryKind::Base,
@@ -265,9 +330,9 @@ fn undeploy_cleans_empty_staged_directories() {
     state.save().unwrap();
 
     state.undeploy().unwrap();
-    assert!(!staged_path.exists());
+    assert!(!target_path.exists());
     assert!(
-        !staged_parent.exists(),
-        "empty staged parent should be cleaned up"
+        !target_parent.exists(),
+        "empty target parent should be cleaned up"
     );
 }

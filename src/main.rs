@@ -61,12 +61,9 @@ enum Commands {
     Diff {
         /// Only show diff for a specific file path
         path: Option<String>,
-        /// Operate on system packages (requires root)
+        /// Target host (defaults to system hostname)
         #[arg(long)]
-        system: bool,
-    },
-    /// Interactively adopt changes made to deployed files back into source
-    Adopt {
+        host: Option<String>,
         /// Operate on system packages (requires root)
         #[arg(long)]
         system: bool,
@@ -161,7 +158,7 @@ enum Commands {
 enum ListWhat {
     /// List packages
     Packages {
-        /// Show details (depends, strategy, etc.)
+        /// Show package details
         #[arg(short, long)]
         verbose: bool,
     },
@@ -384,7 +381,7 @@ fn main() -> anyhow::Result<()> {
                 dotm::status::print_footer(total, modified, missing, color);
 
                 if modified > 0 {
-                    println!("Run 'dotm diff' to see changes, 'dotm adopt' to review and accept.");
+                    println!("Run 'dotm diff' to see changes, 'dotm deploy' to re-sync.");
                 }
             }
 
@@ -392,7 +389,7 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
-        Commands::Diff { path, system } => {
+        Commands::Diff { path, host, system } => {
             let state_dir = if system {
                 check_system_privileges();
                 system_state_dir()
@@ -402,10 +399,36 @@ fn main() -> anyhow::Result<()> {
             let state = dotm::state::DeployState::load(&state_dir)?;
             let mut found_diffs = false;
 
+            // Try to load config for full diff support
+            let config_context: Option<toml::map::Map<String, toml::Value>> = (|| {
+                let loader = dotm::loader::ConfigLoader::new(&cli.dir).ok()?;
+                let hostname = host.clone().or_else(|| {
+                    hostname::get().ok().map(|h| h.to_string_lossy().to_string())
+                })?;
+                let host_config = loader.load_host(&hostname).ok()?;
+                let mut merged_vars = toml::map::Map::new();
+                for role_name in &host_config.roles {
+                    if let Ok(role) = loader.load_role(role_name) {
+                        merged_vars = dotm::vars::merge_vars(&merged_vars, &role.vars);
+                    }
+                }
+                merged_vars = dotm::vars::merge_vars(&merged_vars, &host_config.vars);
+                Some(merged_vars)
+            })();
+
+            if config_context.is_none() && !state.entries().is_empty() {
+                eprintln!("warning: could not load dotfiles config; showing drift status only");
+            }
+
             for entry in state.entries() {
-                if let Some(ref filter) = path
-                    && !entry.target.to_str().unwrap_or("").contains(filter)
-                {
+                if let Some(ref filter) = path {
+                    if !entry.target.to_str().unwrap_or("").contains(filter) {
+                        continue;
+                    }
+                }
+
+                // Skip symlink entries (use git diff for those)
+                if entry.target.is_symlink() {
                     continue;
                 }
 
@@ -416,90 +439,32 @@ fn main() -> anyhow::Result<()> {
 
                 found_diffs = true;
 
-                let current = std::fs::read_to_string(&entry.staged).unwrap_or_default();
-                let original = state
-                    .load_deployed(&entry.content_hash)
-                    .map(|b| String::from_utf8_lossy(&b).to_string())
-                    .unwrap_or_else(|_| "(original not available)".to_string());
+                if let Some(ref vars) = config_context {
+                    // Full diff: re-render or read source, compare to target
+                    let expected = if entry.kind == dotm::scanner::EntryKind::Template {
+                        std::fs::read_to_string(&entry.source)
+                            .ok()
+                            .and_then(|tmpl| dotm::template::render_template(&tmpl, vars).ok())
+                    } else {
+                        std::fs::read_to_string(&entry.source).ok()
+                    };
 
-                let label_a = format!("deployed: {}", entry.target.display());
-                let label_b = format!("current:  {}", entry.target.display());
-                print!(
-                    "{}",
-                    dotm::diff::format_unified_diff(&original, &current, &label_a, &label_b)
-                );
+                    let current = std::fs::read_to_string(&entry.target).unwrap_or_default();
+
+                    if let Some(expected) = expected {
+                        let label_a = format!("expected: {}", entry.target.display());
+                        let label_b = format!("current:  {}", entry.target.display());
+                        print!("{}", dotm::diff::format_unified_diff(&expected, &current, &label_a, &label_b));
+                    } else {
+                        println!("  M {} (source unavailable)", entry.target.display());
+                    }
+                } else {
+                    println!("  M {}", entry.target.display());
+                }
             }
 
             if !found_diffs {
                 println!("No modified files.");
-            }
-        }
-        Commands::Adopt { system } => {
-            let state_dir = if system {
-                check_system_privileges();
-                system_state_dir()
-            } else {
-                dotm_state_dir()
-            };
-            let mut state = dotm::state::DeployState::load_locked(&state_dir)?;
-            let mut adopted_count = 0;
-            let num_entries = state.entries().len();
-
-            for idx in 0..num_entries {
-                let (is_modified, is_template, staged, source, target, content_hash) = {
-                    let entry = &state.entries()[idx];
-                    let status = state.check_entry_status(entry);
-                    (
-                        status.is_modified(),
-                        entry.kind == dotm::scanner::EntryKind::Template,
-                        entry.staged.clone(),
-                        entry.source.clone(),
-                        entry.target.clone(),
-                        entry.content_hash.clone(),
-                    )
-                };
-
-                if !is_modified {
-                    continue;
-                }
-
-                if is_template {
-                    eprintln!(
-                        "Skipping {} (template — changes must be manually applied to the .tera source)",
-                        target.display()
-                    );
-                    continue;
-                }
-
-                let current = std::fs::read_to_string(&staged)?;
-                let original = state
-                    .load_deployed(&content_hash)
-                    .map(|b| String::from_utf8_lossy(&b).to_string())?;
-
-                let file_label = target.to_str().unwrap_or("unknown");
-                match dotm::adopt::interactive_adopt(file_label, &original, &current)? {
-                    Some(patched) => {
-                        std::fs::write(&source, &patched)?;
-                        std::fs::write(&staged, &patched)?;
-
-                        let new_hash = dotm::hash::hash_content(patched.as_bytes());
-                        state.store_deployed(&new_hash, patched.as_bytes())?;
-                        state.update_entry_hash(idx, new_hash);
-
-                        adopted_count += 1;
-                        println!("Adopted changes to {}", source.display());
-                    }
-                    None => {
-                        println!("Skipped {}", target.display());
-                    }
-                }
-            }
-
-            if adopted_count > 0 {
-                state.save()?;
-                println!("\nAdopted changes to {} file(s).", adopted_count);
-            } else {
-                println!("No changes adopted.");
             }
         }
         Commands::Check { warn_suggestions } => {
@@ -577,6 +542,12 @@ fn main() -> anyhow::Result<()> {
 
             // Validate system package configuration
             errors.extend(dotm::config::validate_system_packages(root));
+
+            // Emit deprecation warnings for strategy field
+            let dep_warnings = dotm::config::deprecated_strategy_warnings(loader.root());
+            for w in &dep_warnings {
+                eprintln!("{w}");
+            }
 
             if errors.is_empty() {
                 println!("Configuration is valid.");
@@ -821,10 +792,6 @@ fn main() -> anyhow::Result<()> {
                             let _ = std::fs::remove_file(&entry.target);
                             dotm::state::cleanup_empty_parents(&entry.target);
                         }
-                        if entry.staged != entry.target && entry.staged.exists() {
-                            let _ = std::fs::remove_file(&entry.staged);
-                            dotm::state::cleanup_empty_parents(&entry.staged);
-                        }
                         println!("  - {}", entry.target.display());
                     }
                     pruned += 1;
@@ -959,10 +926,27 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn dotm_state_dir() -> PathBuf {
-    dirs::state_dir()
+    let dotm_dir = dirs::home_dir()
+        .expect("could not determine home directory")
+        .join(".dotm");
+
+    if dotm_dir.join("dotm-state.json").exists() {
+        return dotm_dir;
+    }
+
+    // Legacy fallback: check XDG_STATE_HOME
+    let legacy = dirs::state_dir()
         .or_else(|| dirs::home_dir().map(|h| h.join(".local/state")))
-        .expect("could not determine state directory; set XDG_STATE_HOME")
-        .join("dotm")
+        .expect("could not determine state directory")
+        .join("dotm");
+
+    if legacy.join("dotm-state.json").exists() {
+        eprintln!("note: reading state from legacy location; run 'dotm deploy' to migrate to ~/.dotm/");
+        return legacy;
+    }
+
+    // Default to new location
+    dotm_dir
 }
 
 fn system_state_dir() -> PathBuf {

@@ -226,22 +226,6 @@ strategy = "copy"
 }
 
 #[test]
-fn validate_system_package_missing_strategy() {
-    let toml_str = r#"
-[dotm]
-target = "~"
-[packages.bad]
-system = true
-target = "/etc/foo"
-"#;
-    let config: RootConfig = toml::from_str(toml_str).unwrap();
-    let errors = validate_system_packages(&config);
-    assert!(errors
-        .iter()
-        .any(|e| e.contains("must specify a deployment strategy")));
-}
-
-#[test]
 fn validate_invalid_ownership_format() {
     let toml_str = r#"
 [dotm]
