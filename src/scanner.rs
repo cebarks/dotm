@@ -50,8 +50,8 @@ fn collect_files(
     dir: &Path,
     files: &mut HashMap<PathBuf, Vec<PathBuf>>,
 ) -> Result<()> {
-    for entry in
-        std::fs::read_dir(dir).with_context(|| format!("failed to read directory: {}", dir.display()))?
+    for entry in std::fs::read_dir(dir)
+        .with_context(|| format!("failed to read directory: {}", dir.display()))?
     {
         let entry = entry?;
         let path = entry.path();
@@ -111,30 +111,42 @@ fn resolve_variant(
     roles: &[&str],
 ) -> FileAction {
     let host_suffix = format!("##host.{hostname}");
+    let host_suffix_tera = format!("{host_suffix}.tera");
 
     // Priority 1: host override
-    if let Some(source) = variants
-        .iter()
-        .find(|v| file_name_str(v).contains(&host_suffix))
-    {
+    if let Some(source) = variants.iter().find(|v| {
+        let name = file_name_str(v);
+        name.ends_with(&host_suffix) || name.ends_with(&host_suffix_tera)
+    }) {
+        let kind = if file_name_str(source).ends_with(".tera") {
+            EntryKind::Template
+        } else {
+            EntryKind::Override
+        };
         return FileAction {
             source: source.clone(),
             target_rel_path: target_path.to_path_buf(),
-            kind: EntryKind::Override,
+            kind,
         };
     }
 
     // Priority 2: role override (last matching role wins)
     for role in roles.iter().rev() {
         let role_suffix = format!("##role.{role}");
-        if let Some(source) = variants
-            .iter()
-            .find(|v| file_name_str(v).contains(&role_suffix))
-        {
+        let role_suffix_tera = format!("{role_suffix}.tera");
+        if let Some(source) = variants.iter().find(|v| {
+            let name = file_name_str(v);
+            name.ends_with(&role_suffix) || name.ends_with(&role_suffix_tera)
+        }) {
+            let kind = if file_name_str(source).ends_with(".tera") {
+                EntryKind::Template
+            } else {
+                EntryKind::Override
+            };
             return FileAction {
                 source: source.clone(),
                 target_rel_path: target_path.to_path_buf(),
-                kind: EntryKind::Override,
+                kind,
             };
         }
     }
