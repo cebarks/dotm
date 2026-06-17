@@ -339,6 +339,7 @@ impl DeployState {
     pub fn restore(&mut self, package_filter: Option<&str>) -> Result<usize> {
         let mut restored = 0;
         let mut remaining = Vec::new();
+        let mut restore_error: Option<anyhow::Error> = None;
 
         for entry in &self.entries {
             if let Some(filter) = package_filter {
@@ -348,32 +349,43 @@ impl DeployState {
                 }
             }
 
-            if let Some(ref orig_hash) = entry.original_hash {
-                // Restore original content
-                let original_content = self.load_original(orig_hash)?;
-                std::fs::write(&entry.target, &original_content)
-                    .with_context(|| format!("failed to restore: {}", entry.target.display()))?;
+            // On error, keep unprocessed entries in remaining so state stays consistent
+            if restore_error.is_some() {
+                remaining.push(entry.clone());
+                continue;
+            }
 
-                // Restore original metadata if recorded
-                if entry.original_owner.is_some() || entry.original_group.is_some() {
-                    let _ = crate::metadata::apply_ownership(
-                        &entry.target,
-                        entry.original_owner.as_deref(),
-                        entry.original_group.as_deref(),
-                    );
-                }
-                if let Some(ref orig_mode) = entry.original_mode {
-                    let _ = crate::deployer::apply_permission_override(&entry.target, orig_mode);
-                }
+            let result: Result<()> = (|| {
+                if let Some(ref orig_hash) = entry.original_hash {
+                    let original_content = self.load_original(orig_hash)?;
+                    std::fs::write(&entry.target, &original_content).with_context(|| {
+                        format!("failed to restore: {}", entry.target.display())
+                    })?;
 
-                restored += 1;
-            } else {
-                // No original — file was created by dotm, remove it
-                if entry.target.exists() || entry.target.is_symlink() {
+                    if entry.original_owner.is_some() || entry.original_group.is_some() {
+                        let _ = crate::metadata::apply_ownership(
+                            &entry.target,
+                            entry.original_owner.as_deref(),
+                            entry.original_group.as_deref(),
+                        );
+                    }
+                    if let Some(ref orig_mode) = entry.original_mode {
+                        let _ =
+                            crate::deployer::apply_permission_override(&entry.target, orig_mode);
+                    }
+                } else if entry.target.exists() || entry.target.is_symlink() {
                     std::fs::remove_file(&entry.target)
                         .with_context(|| format!("failed to remove: {}", entry.target.display()))?;
                     cleanup_empty_parents(&entry.target);
-                    restored += 1;
+                }
+                Ok(())
+            })();
+
+            match result {
+                Ok(()) => restored += 1,
+                Err(e) => {
+                    remaining.push(entry.clone());
+                    restore_error = Some(e);
                 }
             }
         }
@@ -381,7 +393,7 @@ impl DeployState {
         if package_filter.is_some() {
             self.entries = remaining;
             self.save()?;
-        } else {
+        } else if restore_error.is_none() {
             let originals = self.originals_dir();
             if originals.is_dir() {
                 let _ = std::fs::remove_dir_all(&originals);
@@ -390,6 +402,10 @@ impl DeployState {
             if state_path.exists() {
                 std::fs::remove_file(&state_path)?;
             }
+        }
+
+        if let Some(e) = restore_error {
+            return Err(e);
         }
 
         Ok(restored)
