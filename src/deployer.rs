@@ -143,7 +143,7 @@ pub fn deploy_copy(
 
     match action.kind {
         crate::scanner::EntryKind::Template => {
-            let content = rendered_content.unwrap_or("");
+            let content = rendered_content.context("template has no rendered content")?;
             std::fs::write(&target_path, content).with_context(|| {
                 format!("failed to write template output: {}", target_path.display())
             })?;
