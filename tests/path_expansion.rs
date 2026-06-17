@@ -33,7 +33,8 @@ fn expands_xdg_config_home() {
 fn expand_path_with_context() {
     // SAFETY: test runs in isolation, no concurrent env access
     unsafe { std::env::remove_var("NONEXISTENT_DOTM_TEST_VAR2") };
-    let result = dotm::orchestrator::expand_path("$NONEXISTENT_DOTM_TEST_VAR2/foo", Some("package 'shell'"));
+    let result =
+        dotm::orchestrator::expand_path("$NONEXISTENT_DOTM_TEST_VAR2/foo", Some("package 'shell'"));
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
     assert!(err_msg.contains("package 'shell'"));

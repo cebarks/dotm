@@ -1,5 +1,5 @@
-use toml::map::Map;
 use toml::Value;
+use toml::map::Map;
 
 /// Deep-merge two TOML variable maps. Values in `overlay` take precedence.
 /// Nested tables are merged recursively; all other types are replaced.

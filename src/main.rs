@@ -3,7 +3,11 @@ use dotm::orchestrator::Orchestrator;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "dotm", about = "Dotfile manager with composable roles", version)]
+#[command(
+    name = "dotm",
+    about = "Dotfile manager with composable roles",
+    version
+)]
 struct Cli {
     /// Path to the dotfiles directory (default: current directory)
     #[arg(short, long, default_value = ".")]
@@ -225,7 +229,10 @@ fn main() -> anyhow::Result<()> {
             let report = orch.deploy(&hostname, dry_run, force)?;
 
             if dry_run {
-                println!("Dry run — would deploy {} files:", report.dry_run_actions.len());
+                println!(
+                    "Dry run — would deploy {} files:",
+                    report.dry_run_actions.len()
+                );
                 for path in &report.dry_run_actions {
                     println!("  {}", path.display());
                 }
@@ -250,11 +257,16 @@ fn main() -> anyhow::Result<()> {
                 }
                 if !report.orphaned.is_empty() {
                     if report.pruned.is_empty() {
-                        eprintln!("Warning: {} orphaned files (no longer managed):", report.orphaned.len());
+                        eprintln!(
+                            "Warning: {} orphaned files (no longer managed):",
+                            report.orphaned.len()
+                        );
                         for path in &report.orphaned {
                             eprintln!("  ? {}", path.display());
                         }
-                        eprintln!("Run 'dotm prune' to clean up, or set auto_prune = true in dotm.toml.");
+                        eprintln!(
+                            "Run 'dotm prune' to clean up, or set auto_prune = true in dotm.toml."
+                        );
                     } else {
                         println!("Pruned {} orphaned files.", report.pruned.len());
                     }
@@ -265,7 +277,11 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
-        Commands::Restore { system, package, dry_run } => {
+        Commands::Restore {
+            system,
+            package,
+            dry_run,
+        } => {
             let state_dir = if system {
                 check_system_privileges();
                 system_state_dir()
@@ -315,7 +331,12 @@ fn main() -> anyhow::Result<()> {
             };
             println!("Removed {removed} managed files.");
         }
-        Commands::Status { verbose, short, package, system } => {
+        Commands::Status {
+            verbose,
+            short,
+            package,
+            system,
+        } => {
             let state_dir = if system {
                 check_system_privileges();
                 system_state_dir()
@@ -403,7 +424,9 @@ fn main() -> anyhow::Result<()> {
             let config_context: Option<toml::map::Map<String, toml::Value>> = (|| {
                 let loader = dotm::loader::ConfigLoader::new(&cli.dir).ok()?;
                 let hostname = host.clone().or_else(|| {
-                    hostname::get().ok().map(|h| h.to_string_lossy().to_string())
+                    hostname::get()
+                        .ok()
+                        .map(|h| h.to_string_lossy().to_string())
                 })?;
                 let host_config = loader.load_host(&hostname).ok()?;
                 let mut merged_vars = toml::map::Map::new();
@@ -454,7 +477,12 @@ fn main() -> anyhow::Result<()> {
                     if let Some(expected) = expected {
                         let label_a = format!("expected: {}", entry.target.display());
                         let label_b = format!("current:  {}", entry.target.display());
-                        print!("{}", dotm::diff::format_unified_diff(&expected, &current, &label_a, &label_b));
+                        print!(
+                            "{}",
+                            dotm::diff::format_unified_diff(
+                                &expected, &current, &label_a, &label_b
+                            )
+                        );
                     } else {
                         println!("  M {} (source unavailable)", entry.target.display());
                     }
@@ -661,9 +689,8 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Commit { message } => {
-            let git_repo = dotm::git::GitRepo::open(&cli.dir).ok_or_else(|| {
-                anyhow::anyhow!("dotfiles directory is not a git repository")
-            })?;
+            let git_repo = dotm::git::GitRepo::open(&cli.dir)
+                .ok_or_else(|| anyhow::anyhow!("dotfiles directory is not a git repository"))?;
 
             let msg = match message {
                 Some(m) => m,
@@ -684,9 +711,8 @@ fn main() -> anyhow::Result<()> {
             println!("Committed changes.");
         }
         Commands::Push => {
-            let git_repo = dotm::git::GitRepo::open(&cli.dir).ok_or_else(|| {
-                anyhow::anyhow!("dotfiles directory is not a git repository")
-            })?;
+            let git_repo = dotm::git::GitRepo::open(&cli.dir)
+                .ok_or_else(|| anyhow::anyhow!("dotfiles directory is not a git repository"))?;
 
             match git_repo.push()? {
                 dotm::git::PushResult::Success => println!("Pushed successfully."),
@@ -705,9 +731,8 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Pull => {
-            let git_repo = dotm::git::GitRepo::open(&cli.dir).ok_or_else(|| {
-                anyhow::anyhow!("dotfiles directory is not a git repository")
-            })?;
+            let git_repo = dotm::git::GitRepo::open(&cli.dir)
+                .ok_or_else(|| anyhow::anyhow!("dotfiles directory is not a git repository"))?;
 
             match git_repo.pull()? {
                 dotm::git::PullResult::Success => println!("Pulled successfully."),
@@ -721,9 +746,7 @@ fn main() -> anyhow::Result<()> {
                     for f in &files {
                         eprintln!("  ! {f}");
                     }
-                    eprintln!(
-                        "\nResolve conflicts in the dotfiles repo, then run 'dotm deploy'."
-                    );
+                    eprintln!("\nResolve conflicts in the dotfiles repo, then run 'dotm deploy'.");
                     std::process::exit(1);
                 }
                 dotm::git::PullResult::Error(msg) => {
@@ -776,11 +799,8 @@ fn main() -> anyhow::Result<()> {
                 .with_system_mode(system);
             let report = orch.deploy(&hostname, true, false)?; // dry run to get the target set
 
-            let new_targets: std::collections::HashSet<std::path::PathBuf> = report
-                .dry_run_actions
-                .iter()
-                .cloned()
-                .collect();
+            let new_targets: std::collections::HashSet<std::path::PathBuf> =
+                report.dry_run_actions.iter().cloned().collect();
 
             let mut pruned = 0;
             for entry in existing_state.entries() {
@@ -822,9 +842,8 @@ fn main() -> anyhow::Result<()> {
             force,
             system,
         } => {
-            let git_repo = dotm::git::GitRepo::open(&cli.dir).ok_or_else(|| {
-                anyhow::anyhow!("dotfiles directory is not a git repository")
-            })?;
+            let git_repo = dotm::git::GitRepo::open(&cli.dir)
+                .ok_or_else(|| anyhow::anyhow!("dotfiles directory is not a git repository"))?;
 
             // Step 1: Pull
             println!("Pulling from remote...");
@@ -951,7 +970,10 @@ fn dotm_state_dir() -> PathBuf {
                 return dotm_dir;
             }
             Err(e) => {
-                eprintln!("warning: could not migrate state to {}: {e}", dotm_dir.display());
+                eprintln!(
+                    "warning: could not migrate state to {}: {e}",
+                    dotm_dir.display()
+                );
                 return legacy;
             }
         }

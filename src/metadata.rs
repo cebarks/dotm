@@ -150,8 +150,7 @@ mod tests {
     fn resolve_preserve_mode_blocks_permission_override() {
         let mut pkg = make_pkg_config();
         pkg.permissions.insert("file.conf".into(), "640".into());
-        pkg.preserve
-            .insert("file.conf".into(), vec!["mode".into()]);
+        pkg.preserve.insert("file.conf".into(), vec!["mode".into()]);
         let meta = resolve_metadata(&pkg, "file.conf");
         assert!(meta.mode.is_none());
     }

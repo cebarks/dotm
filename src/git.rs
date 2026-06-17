@@ -56,9 +56,7 @@ impl GitRepo {
     /// Returns the current branch name, or `None` if HEAD is detached.
     pub fn branch_name(&self) -> Result<Option<String>> {
         let head = self.repo.head()?;
-        let name = head
-            .referent_name()
-            .map(|full| full.shorten().to_string());
+        let name = head.referent_name().map(|full| full.shorten().to_string());
         Ok(name)
     }
 
@@ -350,10 +348,7 @@ mod tests {
 
     /// Configure a minimal git identity in the given repo so `git commit` works.
     fn configure_test_identity(dir: &Path) {
-        for (key, value) in [
-            ("user.name", "Test User"),
-            ("user.email", "test@test.com"),
-        ] {
+        for (key, value) in [("user.name", "Test User"), ("user.email", "test@test.com")] {
             std::process::Command::new("git")
                 .args(["config", key, value])
                 .current_dir(dir)

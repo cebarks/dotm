@@ -106,10 +106,7 @@ impl DeployState {
 
     pub fn load(state_dir: &Path) -> Result<Self> {
         // Only run v1->v2 storage migration for legacy state dirs (not ~/.dotm/)
-        let is_legacy = state_dir
-            .file_name()
-            .map(|n| n != ".dotm")
-            .unwrap_or(true);
+        let is_legacy = state_dir.file_name().map(|n| n != ".dotm").unwrap_or(true);
         if is_legacy {
             Self::migrate_storage(state_dir)?;
         }
@@ -124,7 +121,8 @@ impl DeployState {
         if state.version > CURRENT_VERSION {
             anyhow::bail!(
                 "state file was created by a newer version of dotm (state version {}, max supported {})",
-                state.version, CURRENT_VERSION
+                state.version,
+                CURRENT_VERSION
             );
         }
         if state.version < CURRENT_VERSION {
@@ -137,8 +135,9 @@ impl DeployState {
     /// Load state with an exclusive file lock to prevent concurrent access.
     /// The lock is held until the DeployState is dropped.
     pub fn load_locked(state_dir: &Path) -> Result<Self> {
-        std::fs::create_dir_all(state_dir)
-            .with_context(|| format!("failed to create state directory: {}", state_dir.display()))?;
+        std::fs::create_dir_all(state_dir).with_context(|| {
+            format!("failed to create state directory: {}", state_dir.display())
+        })?;
         let lock_path = state_dir.join("dotm.lock");
         let lock_file = std::fs::OpenOptions::new()
             .create(true)
@@ -160,8 +159,12 @@ impl DeployState {
     }
 
     pub fn save(&self) -> Result<()> {
-        std::fs::create_dir_all(&self.state_dir)
-            .with_context(|| format!("failed to create state directory: {}", self.state_dir.display()))?;
+        std::fs::create_dir_all(&self.state_dir).with_context(|| {
+            format!(
+                "failed to create state directory: {}",
+                self.state_dir.display()
+            )
+        })?;
         let path = self.state_dir.join(STATE_FILE);
         let content = serde_json::to_string_pretty(self)?;
         std::fs::write(&path, content)
@@ -204,15 +207,14 @@ impl DeployState {
             let canon_link = std::fs::canonicalize(&link_dest)
                 .or_else(|_| std::fs::canonicalize(&entry.target))
                 .unwrap_or(link_dest.clone());
-            let canon_source = std::fs::canonicalize(&entry.source)
-                .unwrap_or_else(|_| entry.source.clone());
+            let canon_source =
+                std::fs::canonicalize(&entry.source).unwrap_or_else(|_| entry.source.clone());
 
             if canon_link == canon_source {
                 // Direct symlink to source — no content drift possible
             } else if let Some(ref staged) = entry.staged {
                 // Transitional v2 compatibility: symlink points to staged path
-                let canon_staged = std::fs::canonicalize(staged)
-                    .unwrap_or_else(|_| staged.clone());
+                let canon_staged = std::fs::canonicalize(staged).unwrap_or_else(|_| staged.clone());
                 if canon_link == canon_staged {
                     // v2 staged symlink — check hash for drift
                     if let Ok(current_hash) = hash::hash_file(staged)
@@ -333,7 +335,6 @@ impl DeployState {
                     restored += 1;
                 }
             }
-
         }
 
         // Clean up state directories if restoring everything (no package filter)
@@ -359,12 +360,12 @@ impl DeployState {
         for entry in &self.entries {
             if entry.package == package {
                 if entry.target.is_symlink() || entry.target.exists() {
-                    std::fs::remove_file(&entry.target)
-                        .with_context(|| format!("failed to remove target: {}", entry.target.display()))?;
+                    std::fs::remove_file(&entry.target).with_context(|| {
+                        format!("failed to remove target: {}", entry.target.display())
+                    })?;
                     cleanup_empty_parents(&entry.target);
                     removed += 1;
                 }
-
             } else {
                 remaining.push(entry.clone());
             }
@@ -382,12 +383,12 @@ impl DeployState {
 
         for entry in &self.entries {
             if entry.target.is_symlink() || entry.target.exists() {
-                std::fs::remove_file(&entry.target)
-                    .with_context(|| format!("failed to remove target: {}", entry.target.display()))?;
+                std::fs::remove_file(&entry.target).with_context(|| {
+                    format!("failed to remove target: {}", entry.target.display())
+                })?;
                 cleanup_empty_parents(&entry.target);
                 removed += 1;
             }
-
         }
 
         // Clean up originals directory
@@ -435,7 +436,9 @@ mod tests {
     fn store_and_load_original_content() {
         let dir = TempDir::new().unwrap();
         let state = DeployState::new(dir.path());
-        state.store_original("orig456", b"original pre-existing content").unwrap();
+        state
+            .store_original("orig456", b"original pre-existing content")
+            .unwrap();
         let loaded = state.load_original("orig456").unwrap();
         assert_eq!(loaded, b"original pre-existing content");
     }
@@ -452,7 +455,10 @@ mod tests {
         assert!(!originals.exists());
         let deployed = dir.path().join("deployed");
         assert!(deployed.exists());
-        assert_eq!(std::fs::read_to_string(deployed.join("hash1")).unwrap(), "content1");
+        assert_eq!(
+            std::fs::read_to_string(deployed.join("hash1")).unwrap(),
+            "content1"
+        );
     }
 
     #[test]
@@ -468,7 +474,10 @@ mod tests {
 
         DeployState::migrate_storage(dir.path()).unwrap();
 
-        assert_eq!(std::fs::read_to_string(deployed.join("hash1")).unwrap(), "existing");
+        assert_eq!(
+            std::fs::read_to_string(deployed.join("hash1")).unwrap(),
+            "existing"
+        );
     }
 
     #[test]
@@ -486,6 +495,11 @@ mod tests {
         // Try to acquire from DeployState — should fail
         let result = DeployState::load_locked(dir.path());
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("another dotm process"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("another dotm process")
+        );
     }
 }

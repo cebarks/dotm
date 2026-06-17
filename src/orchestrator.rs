@@ -7,11 +7,11 @@ use crate::scanner;
 use crate::state::{DeployEntry, DeployState};
 use crate::template;
 use crate::vars;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use toml::map::Map;
 use toml::Value;
+use toml::map::Map;
 
 pub struct Orchestrator {
     loader: ConfigLoader,
@@ -140,7 +140,10 @@ impl Orchestrator {
 
             let pkg_dir = packages_dir.join(pkg_name);
             if !pkg_dir.is_dir() {
-                eprintln!("warning: package directory not found: {}", pkg_dir.display());
+                eprintln!(
+                    "warning: package directory not found: {}",
+                    pkg_dir.display()
+                );
                 continue;
             }
 
@@ -158,8 +161,10 @@ impl Orchestrator {
 
             for action in actions {
                 let rendered = if action.kind == scanner::EntryKind::Template {
-                    let tmpl_content = std::fs::read_to_string(&action.source)
-                        .with_context(|| format!("failed to read template: {}", action.source.display()))?;
+                    let tmpl_content =
+                        std::fs::read_to_string(&action.source).with_context(|| {
+                            format!("failed to read template: {}", action.source.display())
+                        })?;
                     Some(template::render_template(&tmpl_content, &merged_vars)?)
                 } else {
                     None
@@ -222,11 +227,14 @@ impl Orchestrator {
                     if !dry_run {
                         if let Some(pkg_config) = self.loader.root().packages.get(prev_pkg) {
                             if let Some(ref cmd) = pkg_config.post_deploy {
-                                let pkg_target = pending.iter()
+                                let pkg_target = pending
+                                    .iter()
                                     .find(|pp| pp.pkg_name == *prev_pkg)
                                     .map(|pp| &pp.pkg_target)
                                     .unwrap();
-                                if let Err(e) = crate::hooks::run_hook(cmd, pkg_target, prev_pkg, "deploy") {
+                                if let Err(e) =
+                                    crate::hooks::run_hook(cmd, pkg_target, prev_pkg, "deploy")
+                                {
                                     eprintln!("warning: {e}");
                                 }
                             }
@@ -238,8 +246,13 @@ impl Orchestrator {
                 if !dry_run {
                     if let Some(pkg_config) = self.loader.root().packages.get(&p.pkg_name) {
                         if let Some(ref cmd) = pkg_config.pre_deploy {
-                            if let Err(e) = crate::hooks::run_hook(cmd, &p.pkg_target, &p.pkg_name, "deploy") {
-                                eprintln!("warning: pre_deploy hook failed, skipping package '{}': {e}", p.pkg_name);
+                            if let Err(e) =
+                                crate::hooks::run_hook(cmd, &p.pkg_target, &p.pkg_name, "deploy")
+                            {
+                                eprintln!(
+                                    "warning: pre_deploy hook failed, skipping package '{}': {e}",
+                                    p.pkg_name
+                                );
                                 skip_pkg = Some(p.pkg_name.clone());
                                 current_pkg = Some(p.pkg_name.clone());
                                 continue;
@@ -276,10 +289,9 @@ impl Orchestrator {
                             "warning: {} has been modified since last deploy, skipping (use --force to overwrite)",
                             p.action.target_rel_path.display()
                         );
-                        report.conflicts.push((
-                            target_path,
-                            "modified since last deploy".to_string(),
-                        ));
+                        report
+                            .conflicts
+                            .push((target_path, "modified since last deploy".to_string()));
                         continue;
                     }
                 }
@@ -315,12 +327,7 @@ impl Orchestrator {
 
             // Deploy using the appropriate method
             let result = if use_symlink {
-                deployer::deploy_symlink(
-                    &p.action,
-                    &p.pkg_target,
-                    dry_run,
-                    effective_force,
-                )?
+                deployer::deploy_symlink(&p.action, &p.pkg_target, dry_run, effective_force)?
             } else {
                 deployer::deploy_copy(
                     &p.action,
@@ -356,7 +363,10 @@ impl Orchestrator {
                                     resolved.owner.as_deref(),
                                     resolved.group.as_deref(),
                                 ) {
-                                    eprintln!("warning: failed to set ownership on {}: {e}", target_path.display());
+                                    eprintln!(
+                                        "warning: failed to set ownership on {}: {e}",
+                                        target_path.display()
+                                    );
                                 }
                             }
 
@@ -366,16 +376,10 @@ impl Orchestrator {
 
                             resolved
                         } else {
-                            metadata::resolve_metadata(
-                                &crate::config::PackageConfig::default(),
-                                "",
-                            )
+                            metadata::resolve_metadata(&crate::config::PackageConfig::default(), "")
                         }
                     } else {
-                        metadata::resolve_metadata(
-                            &crate::config::PackageConfig::default(),
-                            "",
-                        )
+                        metadata::resolve_metadata(&crate::config::PackageConfig::default(), "")
                     };
 
                     let abs_source = std::fs::canonicalize(&p.action.source)
@@ -418,11 +422,13 @@ impl Orchestrator {
             if !dry_run && skip_pkg.as_deref() != Some(last_pkg) {
                 if let Some(pkg_config) = self.loader.root().packages.get(last_pkg) {
                     if let Some(ref cmd) = pkg_config.post_deploy {
-                        let pkg_target = pending.iter()
+                        let pkg_target = pending
+                            .iter()
                             .find(|pp| pp.pkg_name == *last_pkg)
                             .map(|pp| &pp.pkg_target)
                             .unwrap();
-                        if let Err(e) = crate::hooks::run_hook(cmd, pkg_target, last_pkg, "deploy") {
+                        if let Err(e) = crate::hooks::run_hook(cmd, pkg_target, last_pkg, "deploy")
+                        {
                             eprintln!("warning: {e}");
                         }
                     }

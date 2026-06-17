@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use tera::Tera;
-use toml::map::Map;
 use toml::Value;
+use toml::map::Map;
 
 /// Render a Tera template string with the given variables.
 pub fn render_template(template_str: &str, vars: &Map<String, Value>) -> Result<String> {
@@ -32,8 +32,10 @@ fn toml_value_to_json(value: &Value) -> serde_json::Value {
         Value::Datetime(dt) => serde_json::Value::String(dt.to_string()),
         Value::Array(arr) => serde_json::Value::Array(arr.iter().map(toml_value_to_json).collect()),
         Value::Table(table) => {
-            let map: serde_json::Map<String, serde_json::Value> =
-                table.iter().map(|(k, v)| (k.clone(), toml_value_to_json(v))).collect();
+            let map: serde_json::Map<String, serde_json::Value> = table
+                .iter()
+                .map(|(k, v)| (k.clone(), toml_value_to_json(v)))
+                .collect();
             serde_json::Value::Object(map)
         }
     }

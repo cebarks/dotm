@@ -37,11 +37,7 @@ fn deploy_detects_orphaned_files() {
     assert!(target.path().join(".config/nvim/init.lua").exists());
 
     // Now remove editor from the dev role config
-    std::fs::write(
-        dotfiles.path().join("roles/dev.toml"),
-        "packages = []\n",
-    )
-    .unwrap();
+    std::fs::write(dotfiles.path().join("roles/dev.toml"), "packages = []\n").unwrap();
 
     // Redeploy — editor's files should be detected as orphans
     let mut orch2 = Orchestrator::new(dotfiles.path(), target.path())
@@ -76,11 +72,7 @@ fn auto_prune_removes_orphaned_files() {
     assert!(target.path().join(".config/nvim/init.lua").exists());
 
     // Remove editor from dev role
-    std::fs::write(
-        dotfiles.path().join("roles/dev.toml"),
-        "packages = []\n",
-    )
-    .unwrap();
+    std::fs::write(dotfiles.path().join("roles/dev.toml"), "packages = []\n").unwrap();
 
     // Redeploy with auto_prune — orphans should be removed
     let mut orch2 = Orchestrator::new(dotfiles.path(), target.path())

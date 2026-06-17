@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::collections::HashMap;
-use toml::map::Map;
 use toml::Value;
+use toml::map::Map;
 
 #[derive(Debug, Deserialize)]
 pub struct RootConfig {

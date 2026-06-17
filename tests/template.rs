@@ -1,6 +1,6 @@
 use dotm::template::render_template;
-use toml::map::Map;
 use toml::Value;
+use toml::map::Map;
 
 fn vars_from_str(s: &str) -> Map<String, Value> {
     let val: Value = toml::from_str(s).unwrap();

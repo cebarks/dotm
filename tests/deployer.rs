@@ -1,4 +1,4 @@
-use dotm::deployer::{apply_permission_override, deploy_copy, deploy_symlink, DeployResult};
+use dotm::deployer::{DeployResult, apply_permission_override, deploy_copy, deploy_symlink};
 use dotm::scanner::{EntryKind, FileAction};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -32,7 +32,10 @@ fn symlink_base_file_to_source() {
     );
 
     // Content should match source
-    assert_eq!(std::fs::read_to_string(&target).unwrap(), "base config content");
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "base config content"
+    );
 }
 
 #[test]
@@ -86,7 +89,10 @@ fn symlink_conflicts_with_unmanaged_regular_file() {
     let target = target_dir.path().join("conflict.conf");
     assert!(target.exists());
     assert!(!target.is_symlink());
-    assert_eq!(std::fs::read_to_string(&target).unwrap(), "I was here first");
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "I was here first"
+    );
 }
 
 #[test]
@@ -138,7 +144,11 @@ fn symlink_errors_on_directory_target() {
     let result = deploy_symlink(&action, target_dir.path(), false, false).unwrap();
     match result {
         DeployResult::Conflict(msg) => {
-            assert!(msg.contains("directory"), "expected 'directory' in error message, got: {}", msg);
+            assert!(
+                msg.contains("directory"),
+                "expected 'directory' in error message, got: {}",
+                msg
+            );
         }
         _ => panic!("expected Conflict result for directory target"),
     }
@@ -161,7 +171,10 @@ fn symlink_dry_run_creates_nothing() {
     let result = deploy_symlink(&action, target_dir.path(), true, false).unwrap();
     assert!(matches!(result, DeployResult::DryRun));
 
-    assert!(!target_dir.path().join(".config/app.conf").exists(), "dry run should not create target symlink");
+    assert!(
+        !target_dir.path().join(".config/app.conf").exists(),
+        "dry run should not create target symlink"
+    );
 }
 
 // --- deploy_copy tests ---
@@ -186,8 +199,14 @@ fn copy_writes_rendered_template() {
 
     let target = target_dir.path().join(".config/app.conf");
     assert!(target.exists());
-    assert!(!target.is_symlink(), "template should be a regular file, not a symlink");
-    assert_eq!(std::fs::read_to_string(&target).unwrap(), "rendered template output");
+    assert!(
+        !target.is_symlink(),
+        "template should be a regular file, not a symlink"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "rendered template output"
+    );
 }
 
 #[test]
@@ -210,8 +229,14 @@ fn copy_base_file_copies_from_source() {
 
     let target = target_dir.path().join("script.sh");
     assert!(target.exists());
-    assert!(!target.is_symlink(), "deploy_copy should create a regular file, not a symlink");
-    assert_eq!(std::fs::read_to_string(&target).unwrap(), "#!/bin/sh\necho hello");
+    assert!(
+        !target.is_symlink(),
+        "deploy_copy should create a regular file, not a symlink"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "#!/bin/sh\necho hello"
+    );
 
     // Check permissions were preserved
     let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
@@ -238,7 +263,11 @@ fn copy_errors_on_directory_target() {
     let result = deploy_copy(&action, target_dir.path(), false, false, None).unwrap();
     match result {
         DeployResult::Conflict(msg) => {
-            assert!(msg.contains("directory"), "expected 'directory' in error message, got: {}", msg);
+            assert!(
+                msg.contains("directory"),
+                "expected 'directory' in error message, got: {}",
+                msg
+            );
         }
         _ => panic!("expected Conflict result for directory target"),
     }
@@ -269,7 +298,10 @@ fn copy_replaces_existing_symlink() {
 
     // Target should now be a regular file (not symlink)
     assert!(!target_path.is_symlink());
-    assert_eq!(std::fs::read_to_string(&target_path).unwrap(), "new content");
+    assert_eq!(
+        std::fs::read_to_string(&target_path).unwrap(),
+        "new content"
+    );
 }
 
 #[test]
@@ -295,7 +327,10 @@ fn copy_conflicts_with_unmanaged_regular_file() {
     // Original file should still exist
     let target = target_dir.path().join("conflict.conf");
     assert!(target.exists());
-    assert_eq!(std::fs::read_to_string(&target).unwrap(), "I was here first");
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "I was here first"
+    );
 }
 
 #[test]
@@ -340,7 +375,10 @@ fn copy_dry_run_creates_nothing() {
     let result = deploy_copy(&action, target_dir.path(), true, false, None).unwrap();
     assert!(matches!(result, DeployResult::DryRun));
 
-    assert!(!target_dir.path().join(".config/app.conf").exists(), "dry run should not create target file");
+    assert!(
+        !target_dir.path().join(".config/app.conf").exists(),
+        "dry run should not create target file"
+    );
 }
 
 // --- apply_permission_override tests ---

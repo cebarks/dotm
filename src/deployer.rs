@@ -40,13 +40,18 @@ pub fn deploy_symlink(
 
     // Existing symlink (broken or pointing elsewhere): remove it
     if target_path.is_symlink() {
-        std::fs::remove_file(&target_path)
-            .with_context(|| format!("failed to remove existing symlink: {}", target_path.display()))?;
+        std::fs::remove_file(&target_path).with_context(|| {
+            format!(
+                "failed to remove existing symlink: {}",
+                target_path.display()
+            )
+        })?;
     } else if target_path.exists() {
         // Regular file: conflict unless force
         if force {
-            std::fs::remove_file(&target_path)
-                .with_context(|| format!("failed to remove existing file: {}", target_path.display()))?;
+            std::fs::remove_file(&target_path).with_context(|| {
+                format!("failed to remove existing file: {}", target_path.display())
+            })?;
         } else {
             return Ok(DeployResult::Conflict(format!(
                 "file already exists and is not managed by dotm: {}",
@@ -62,10 +67,19 @@ pub fn deploy_symlink(
     }
 
     // Create symlink to canonicalized source path
-    let abs_source = std::fs::canonicalize(&action.source)
-        .with_context(|| format!("failed to canonicalize source path: {}", action.source.display()))?;
-    std::os::unix::fs::symlink(&abs_source, &target_path)
-        .with_context(|| format!("failed to create symlink: {} -> {}", target_path.display(), abs_source.display()))?;
+    let abs_source = std::fs::canonicalize(&action.source).with_context(|| {
+        format!(
+            "failed to canonicalize source path: {}",
+            action.source.display()
+        )
+    })?;
+    std::os::unix::fs::symlink(&abs_source, &target_path).with_context(|| {
+        format!(
+            "failed to create symlink: {} -> {}",
+            target_path.display(),
+            abs_source.display()
+        )
+    })?;
 
     if was_existing {
         Ok(DeployResult::Updated)
@@ -103,11 +117,16 @@ pub fn deploy_copy(
 
     if target_path.exists() || target_path.is_symlink() {
         if target_path.is_symlink() {
-            std::fs::remove_file(&target_path)
-                .with_context(|| format!("failed to remove existing symlink: {}", target_path.display()))?;
+            std::fs::remove_file(&target_path).with_context(|| {
+                format!(
+                    "failed to remove existing symlink: {}",
+                    target_path.display()
+                )
+            })?;
         } else if force {
-            std::fs::remove_file(&target_path)
-                .with_context(|| format!("failed to remove existing file: {}", target_path.display()))?;
+            std::fs::remove_file(&target_path).with_context(|| {
+                format!("failed to remove existing file: {}", target_path.display())
+            })?;
         } else {
             return Ok(DeployResult::Conflict(format!(
                 "file already exists and is not managed by dotm: {}",
@@ -125,12 +144,18 @@ pub fn deploy_copy(
     match action.kind {
         crate::scanner::EntryKind::Template => {
             let content = rendered_content.unwrap_or("");
-            std::fs::write(&target_path, content)
-                .with_context(|| format!("failed to write template output: {}", target_path.display()))?;
+            std::fs::write(&target_path, content).with_context(|| {
+                format!("failed to write template output: {}", target_path.display())
+            })?;
         }
         crate::scanner::EntryKind::Base | crate::scanner::EntryKind::Override => {
-            std::fs::copy(&action.source, &target_path)
-                .with_context(|| format!("failed to copy {} to {}", action.source.display(), target_path.display()))?;
+            std::fs::copy(&action.source, &target_path).with_context(|| {
+                format!(
+                    "failed to copy {} to {}",
+                    action.source.display(),
+                    target_path.display()
+                )
+            })?;
             copy_permissions(&action.source, &target_path)?;
         }
     }

@@ -70,7 +70,10 @@ fn e2e_deploy_with_template_rendering() {
     // templated.conf should be a regular file (copy), not a symlink
     let templated = target.path().join(".config/templated.conf");
     assert!(templated.exists());
-    assert!(!templated.is_symlink(), "template should be a copy, not a symlink");
+    assert!(
+        !templated.is_symlink(),
+        "template should be a copy, not a symlink"
+    );
     let content = std::fs::read_to_string(&templated).unwrap();
     assert!(
         content.contains("blue"),
@@ -324,7 +327,10 @@ fn e2e_deploy_detects_modification() {
         .find(|e| e.target.ends_with("templated.conf"))
         .unwrap();
     let status = state.check_entry_status(entry);
-    assert!(status.is_modified(), "should detect modified templated.conf");
+    assert!(
+        status.is_modified(),
+        "should detect modified templated.conf"
+    );
 }
 
 #[test]

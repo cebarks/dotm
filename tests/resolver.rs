@@ -70,10 +70,7 @@ fn resolve_deduplicates() {
 
 #[test]
 fn resolve_circular_dep_errors() {
-    let root = make_root(vec![
-        ("a", vec!["b"], vec![]),
-        ("b", vec!["a"], vec![]),
-    ]);
+    let root = make_root(vec![("a", vec!["b"], vec![]), ("b", vec!["a"], vec![])]);
     let result = resolve_packages(&root, &["a"]);
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();

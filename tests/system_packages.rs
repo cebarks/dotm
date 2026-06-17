@@ -80,10 +80,7 @@ fn system_mode_only_deploys_system_packages() {
         service_conf.exists(),
         "system package file should be deployed in system mode"
     );
-    assert_eq!(
-        std::fs::read_to_string(&service_conf).unwrap(),
-        "key=value"
-    );
+    assert_eq!(std::fs::read_to_string(&service_conf).unwrap(), "key=value");
 
     // User package should NOT be deployed (to either target)
     let bashrc = target.path().join(".bashrc");

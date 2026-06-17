@@ -1,6 +1,6 @@
 use dotm::vars::merge_vars;
-use toml::map::Map;
 use toml::Value;
+use toml::map::Map;
 
 fn map_from_str(s: &str) -> Map<String, Value> {
     let val: Value = toml::from_str(s).unwrap();
@@ -49,6 +49,9 @@ resolution = "3840x2160"
     );
     let result = merge_vars(&base, &overlay);
     let display = result.get("display").unwrap().as_table().unwrap();
-    assert_eq!(display.get("resolution").unwrap().as_str().unwrap(), "3840x2160");
+    assert_eq!(
+        display.get("resolution").unwrap().as_str().unwrap(),
+        "3840x2160"
+    );
     assert_eq!(display.get("refresh").unwrap().as_integer().unwrap(), 60);
 }

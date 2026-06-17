@@ -74,21 +74,33 @@ pub fn render_tree(loader: &ConfigLoader) -> Result<String> {
 
     for (hi, host_name) in hosts.iter().enumerate() {
         let is_last_host = hi == hosts.len() - 1;
-        let host_prefix = if is_last_host { "└── " } else { "├── " };
+        let host_prefix = if is_last_host {
+            "└── "
+        } else {
+            "├── "
+        };
         out.push_str(&format!("{host_prefix}{host_name}\n"));
 
         if let Ok(host) = loader.load_host(host_name) {
             for (ri, role_name) in host.roles.iter().enumerate() {
                 let is_last_role = ri == host.roles.len() - 1;
                 let branch = if is_last_host { "    " } else { "│   " };
-                let role_prefix = if is_last_role { "└── " } else { "├── " };
+                let role_prefix = if is_last_role {
+                    "└── "
+                } else {
+                    "├── "
+                };
                 out.push_str(&format!("{branch}{role_prefix}{role_name}\n"));
 
                 if let Ok(role) = loader.load_role(role_name) {
                     for (pi, pkg_name) in role.packages.iter().enumerate() {
                         let is_last_pkg = pi == role.packages.len() - 1;
                         let inner_branch = if is_last_role { "    " } else { "│   " };
-                        let pkg_prefix = if is_last_pkg { "└── " } else { "├── " };
+                        let pkg_prefix = if is_last_pkg {
+                            "└── "
+                        } else {
+                            "├── "
+                        };
                         out.push_str(&format!("{branch}{inner_branch}{pkg_prefix}{pkg_name}\n"));
                     }
                 }

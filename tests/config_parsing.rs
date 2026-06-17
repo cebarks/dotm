@@ -1,4 +1,4 @@
-use dotm::config::{validate_system_packages, HostConfig, RoleConfig, RootConfig};
+use dotm::config::{HostConfig, RoleConfig, RootConfig, validate_system_packages};
 
 #[test]
 fn parse_minimal_root_config() {
@@ -35,7 +35,10 @@ description = "General utility configs"
     assert_eq!(config.packages.len(), 3);
 
     let kde = &config.packages["kde"];
-    assert_eq!(kde.description.as_deref(), Some("KDE Plasma desktop configs"));
+    assert_eq!(
+        kde.description.as_deref(),
+        Some("KDE Plasma desktop configs")
+    );
     assert_eq!(kde.depends, vec!["util"]);
     assert_eq!(kde.suggests, vec!["gaming"]);
 
@@ -75,8 +78,14 @@ gpu.vendor = "amd"
     assert_eq!(config.roles, vec!["desktop", "gaming", "dev"]);
 
     let display = config.vars.get("display").unwrap().as_table().unwrap();
-    assert_eq!(display.get("resolution").unwrap().as_str().unwrap(), "3840x2160");
-    assert_eq!(display.get("refresh_rate").unwrap().as_integer().unwrap(), 120);
+    assert_eq!(
+        display.get("resolution").unwrap().as_str().unwrap(),
+        "3840x2160"
+    );
+    assert_eq!(
+        display.get("refresh_rate").unwrap().as_integer().unwrap(),
+        120
+    );
 }
 
 #[test]
@@ -183,7 +192,10 @@ group = "root"
     assert_eq!(etc.ownership.get("etc/gshadow").unwrap(), "root:shadow");
 
     let shadow_preserve = etc.preserve.get("etc/shadow").unwrap();
-    assert_eq!(shadow_preserve, &vec!["mode".to_string(), "ownership".to_string()]);
+    assert_eq!(
+        shadow_preserve,
+        &vec!["mode".to_string(), "ownership".to_string()]
+    );
 
     let gshadow_preserve = etc.preserve.get("etc/gshadow").unwrap();
     assert_eq!(gshadow_preserve, &vec!["mode".to_string()]);
@@ -236,7 +248,11 @@ target = "~"
 "#;
     let config: RootConfig = toml::from_str(toml_str).unwrap();
     let errors = validate_system_packages(&config);
-    assert!(errors.iter().any(|e| e.contains("invalid ownership format")));
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("invalid ownership format"))
+    );
 }
 
 #[test]
@@ -252,9 +268,11 @@ target = "~"
 "#;
     let config: RootConfig = toml::from_str(toml_str).unwrap();
     let errors = validate_system_packages(&config);
-    assert!(errors
-        .iter()
-        .any(|e| e.contains("preserve") && e.contains("ownership")));
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("preserve") && e.contains("ownership"))
+    );
 }
 
 #[test]

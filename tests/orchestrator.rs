@@ -15,7 +15,10 @@ fn full_deploy_basic_fixture() {
         "unexpected conflicts: {:?}",
         report.conflicts
     );
-    assert!(!report.created.is_empty(), "expected some files to be created");
+    assert!(
+        !report.created.is_empty(),
+        "expected some files to be created"
+    );
 
     // Check that .bashrc is a symlink pointing into packages/ (not .staged/)
     assert!(target_dir.path().join(".bashrc").is_symlink());

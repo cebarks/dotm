@@ -36,7 +36,10 @@ mod tests {
         let hash1 = hash_file(&path).unwrap();
         let hash2 = hash_file(&path).unwrap();
         assert_eq!(hash1, hash2);
-        assert_eq!(hash1, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
+        assert_eq!(
+            hash1,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
     }
 
     #[test]

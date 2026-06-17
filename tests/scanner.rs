@@ -10,12 +10,18 @@ fn scan_resolves_host_override_over_base() {
         .iter()
         .find(|a| a.target_rel_path.to_str() == Some(".config/app.conf"))
         .unwrap();
-    assert!(app_conf
-        .source
-        .to_str()
-        .unwrap()
-        .ends_with("app.conf##host.myhost"));
-    assert_eq!(app_conf.kind, dotm::scanner::EntryKind::Override, "overrides should be copied, not symlinked");
+    assert!(
+        app_conf
+            .source
+            .to_str()
+            .unwrap()
+            .ends_with("app.conf##host.myhost")
+    );
+    assert_eq!(
+        app_conf.kind,
+        dotm::scanner::EntryKind::Override,
+        "overrides should be copied, not symlinked"
+    );
 }
 
 #[test]
@@ -27,11 +33,13 @@ fn scan_resolves_role_override_when_no_host_override() {
         .iter()
         .find(|a| a.target_rel_path.to_str() == Some(".config/app.conf"))
         .unwrap();
-    assert!(app_conf
-        .source
-        .to_str()
-        .unwrap()
-        .ends_with("app.conf##role.desktop"));
+    assert!(
+        app_conf
+            .source
+            .to_str()
+            .unwrap()
+            .ends_with("app.conf##role.desktop")
+    );
     assert_eq!(app_conf.kind, dotm::scanner::EntryKind::Override);
 }
 
@@ -46,7 +54,11 @@ fn scan_uses_base_when_no_overrides_match() {
         .unwrap();
     assert!(app_conf.source.to_str().unwrap().ends_with("app.conf"));
     assert!(!app_conf.source.to_str().unwrap().contains("##"));
-    assert_eq!(app_conf.kind, dotm::scanner::EntryKind::Base, "plain files should be symlinked");
+    assert_eq!(
+        app_conf.kind,
+        dotm::scanner::EntryKind::Base,
+        "plain files should be symlinked"
+    );
 }
 
 #[test]
@@ -79,9 +91,11 @@ fn scan_excludes_non_matching_overrides() {
     let pkg_dir = Path::new("tests/fixtures/overrides/packages/configs");
     let actions = scan_package(pkg_dir, "myhost", &["desktop"]).unwrap();
 
-    assert!(actions
-        .iter()
-        .all(|a| !a.source.to_str().unwrap().contains("##host.other")));
+    assert!(
+        actions
+            .iter()
+            .all(|a| !a.source.to_str().unwrap().contains("##host.other"))
+    );
     let app_count = actions
         .iter()
         .filter(|a| a.target_rel_path.to_str() == Some(".config/app.conf"))
