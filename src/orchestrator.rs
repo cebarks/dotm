@@ -79,6 +79,10 @@ impl Orchestrator {
             .map(|d| DeployState::new(d))
             .unwrap_or_default();
 
+        if self.state_dir.is_some() {
+            state.lock()?;
+        }
+
         // 1. Load host config
         let host = self
             .loader

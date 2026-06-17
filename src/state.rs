@@ -104,6 +104,33 @@ impl DeployState {
         }
     }
 
+    /// Acquire an exclusive file lock without loading existing state.
+    pub fn lock(&mut self) -> Result<()> {
+        std::fs::create_dir_all(&self.state_dir).with_context(|| {
+            format!(
+                "failed to create state directory: {}",
+                self.state_dir.display()
+            )
+        })?;
+        let lock_path = self.state_dir.join("dotm.lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| format!("failed to open lock file: {}", lock_path.display()))?;
+
+        lock_file.try_lock_exclusive().map_err(|_| {
+            anyhow::anyhow!(
+                "another dotm process is running (could not acquire lock on {})",
+                lock_path.display()
+            )
+        })?;
+
+        self.lock = Some(lock_file);
+        Ok(())
+    }
+
     pub fn load(state_dir: &Path) -> Result<Self> {
         // Only run v1->v2 storage migration for legacy state dirs (not ~/.dotm/)
         let is_legacy = state_dir.file_name().map(|n| n != ".dotm").unwrap_or(true);
