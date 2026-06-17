@@ -288,7 +288,7 @@ fn main() -> anyhow::Result<()> {
             } else {
                 dotm_state_dir()
             };
-            let state = dotm::state::DeployState::load_locked(&state_dir)?;
+            let mut state = dotm::state::DeployState::load_locked(&state_dir)?;
 
             if state.entries().is_empty() {
                 println!("No files currently managed by dotm.");

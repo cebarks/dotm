@@ -305,12 +305,14 @@ impl DeployState {
     /// Files with original_hash get their original content written back with original metadata.
     /// Files without original_hash (dotm created them) get removed.
     /// Returns the count of restored files.
-    pub fn restore(&self, package_filter: Option<&str>) -> Result<usize> {
+    pub fn restore(&mut self, package_filter: Option<&str>) -> Result<usize> {
         let mut restored = 0;
+        let mut remaining = Vec::new();
 
         for entry in &self.entries {
             if let Some(filter) = package_filter {
                 if entry.package != filter {
+                    remaining.push(entry.clone());
                     continue;
                 }
             }
@@ -345,8 +347,10 @@ impl DeployState {
             }
         }
 
-        // Clean up state directories if restoring everything (no package filter)
-        if package_filter.is_none() {
+        if package_filter.is_some() {
+            self.entries = remaining;
+            self.save()?;
+        } else {
             let originals = self.originals_dir();
             if originals.is_dir() {
                 let _ = std::fs::remove_dir_all(&originals);
