@@ -799,8 +799,12 @@ fn main() -> anyhow::Result<()> {
                 .with_system_mode(system);
             let report = orch.deploy(&hostname, true, false)?; // dry run to get the target set
 
-            let new_targets: std::collections::HashSet<std::path::PathBuf> =
-                report.dry_run_actions.iter().cloned().collect();
+            let new_targets: std::collections::HashSet<std::path::PathBuf> = report
+                .dry_run_actions
+                .iter()
+                .cloned()
+                .chain(report.conflicts.iter().map(|(path, _)| path.clone()))
+                .collect();
 
             let mut pruned = 0;
             for entry in existing_state.entries() {
