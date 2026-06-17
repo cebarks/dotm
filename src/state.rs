@@ -166,9 +166,17 @@ impl DeployState {
             )
         })?;
         let path = self.state_dir.join(STATE_FILE);
+        let tmp_path = self.state_dir.join(".dotm-state.json.tmp");
         let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(&path, content)
-            .with_context(|| format!("failed to write state file: {}", path.display()))?;
+        std::fs::write(&tmp_path, &content)
+            .with_context(|| format!("failed to write temp state file: {}", tmp_path.display()))?;
+        std::fs::rename(&tmp_path, &path).with_context(|| {
+            format!(
+                "failed to rename temp state file: {} -> {}",
+                tmp_path.display(),
+                path.display()
+            )
+        })?;
         Ok(())
     }
 
