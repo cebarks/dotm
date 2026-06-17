@@ -799,8 +799,10 @@ fn main() -> anyhow::Result<()> {
                 .collect();
 
             let mut pruned_targets = Vec::new();
+            let mut orphan_count = 0;
             for entry in existing_state.entries() {
                 if !new_targets.contains(&entry.target) {
+                    orphan_count += 1;
                     if dry_run {
                         println!("  ? {}", entry.target.display());
                     } else {
@@ -814,7 +816,7 @@ fn main() -> anyhow::Result<()> {
                 }
             }
 
-            let pruned = pruned_targets.len();
+            let pruned = orphan_count;
 
             if dry_run {
                 if pruned > 0 {
