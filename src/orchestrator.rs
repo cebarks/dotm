@@ -10,8 +10,6 @@ use crate::vars;
 use anyhow::{Context, Result, bail};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use toml::Value;
-use toml::map::Map;
 
 pub struct Orchestrator {
     loader: ConfigLoader,
@@ -83,15 +81,16 @@ impl Orchestrator {
             state.lock()?;
         }
 
-        // 1. Load host config
+        // 1. Load host config and merge vars
         let host = self
             .loader
             .load_host(hostname)
             .with_context(|| format!("failed to load host config for '{hostname}'"))?;
 
-        // 2. Load roles and collect packages + merge vars
+        let merged_vars = vars::resolve_vars(&self.loader, hostname)?;
+
+        // 2. Collect packages from roles
         let mut all_requested_packages: Vec<String> = Vec::new();
-        let mut merged_vars: Map<String, Value> = Map::new();
 
         for role_name in &host.roles {
             let role = self
@@ -104,12 +103,7 @@ impl Orchestrator {
                     all_requested_packages.push(pkg.clone());
                 }
             }
-
-            merged_vars = vars::merge_vars(&merged_vars, &role.vars);
         }
-
-        // Host vars override role vars
-        merged_vars = vars::merge_vars(&merged_vars, &host.vars);
 
         // 3. Resolve dependencies
         let requested_refs: Vec<&str> = all_requested_packages.iter().map(|s| s.as_str()).collect();

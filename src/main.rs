@@ -428,15 +428,7 @@ fn main() -> anyhow::Result<()> {
                         .ok()
                         .map(|h| h.to_string_lossy().to_string())
                 })?;
-                let host_config = loader.load_host(&hostname).ok()?;
-                let mut merged_vars = toml::map::Map::new();
-                for role_name in &host_config.roles {
-                    if let Ok(role) = loader.load_role(role_name) {
-                        merged_vars = dotm::vars::merge_vars(&merged_vars, &role.vars);
-                    }
-                }
-                merged_vars = dotm::vars::merge_vars(&merged_vars, &host_config.vars);
-                Some(merged_vars)
+                dotm::vars::resolve_vars(&loader, &hostname).ok()
             })();
 
             if config_context.is_none() && !state.entries().is_empty() {
