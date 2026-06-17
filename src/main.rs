@@ -428,7 +428,7 @@ fn main() -> anyhow::Result<()> {
                         .ok()
                         .map(|h| h.to_string_lossy().to_string())
                 })?;
-                dotm::vars::resolve_vars(&loader, &hostname).ok()
+                dotm::vars::resolve_vars_lenient(&loader, &hostname)
             })();
 
             if config_context.is_none() && !state.entries().is_empty() {
