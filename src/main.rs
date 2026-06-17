@@ -941,9 +941,11 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn dotm_state_dir() -> PathBuf {
-    let dotm_dir = dirs::home_dir()
-        .expect("could not determine home directory")
-        .join(".dotm");
+    let home = dirs::home_dir().unwrap_or_else(|| {
+        eprintln!("error: could not determine home directory");
+        std::process::exit(1);
+    });
+    let dotm_dir = home.join(".dotm");
 
     if dotm_dir.join("dotm-state.json").exists() {
         return dotm_dir;
@@ -952,7 +954,10 @@ fn dotm_state_dir() -> PathBuf {
     // Legacy fallback: check XDG_STATE_HOME
     let legacy = dirs::state_dir()
         .or_else(|| dirs::home_dir().map(|h| h.join(".local/state")))
-        .expect("could not determine state directory")
+        .unwrap_or_else(|| {
+            eprintln!("error: could not determine state directory");
+            std::process::exit(1);
+        })
         .join("dotm");
 
     if legacy.join("dotm-state.json").exists() {
