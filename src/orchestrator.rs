@@ -218,202 +218,220 @@ impl Orchestrator {
         // Phase 4: Deploy each action (with per-package hooks)
         let mut current_pkg: Option<String> = None;
         let mut skip_pkg: Option<String> = None;
+        let mut deploy_error: Option<anyhow::Error> = None;
 
         for p in &pending {
-            // Run pre_deploy hook when entering a new package
-            if current_pkg.as_deref() != Some(&p.pkg_name) {
-                // Run post_deploy for the previous package
-                if let Some(ref prev_pkg) = current_pkg {
-                    if !dry_run {
-                        if let Some(pkg_config) = self.loader.root().packages.get(prev_pkg) {
-                            if let Some(ref cmd) = pkg_config.post_deploy {
-                                let pkg_target = pending
-                                    .iter()
-                                    .find(|pp| pp.pkg_name == *prev_pkg)
-                                    .map(|pp| &pp.pkg_target)
-                                    .unwrap();
-                                if let Err(e) =
-                                    crate::hooks::run_hook(cmd, pkg_target, prev_pkg, "deploy")
-                                {
-                                    eprintln!("warning: {e}");
+            let file_result: Result<()> = (|| {
+                // Run pre_deploy hook when entering a new package
+                if current_pkg.as_deref() != Some(&p.pkg_name) {
+                    // Run post_deploy for the previous package
+                    if let Some(ref prev_pkg) = current_pkg {
+                        if !dry_run {
+                            if let Some(pkg_config) = self.loader.root().packages.get(prev_pkg) {
+                                if let Some(ref cmd) = pkg_config.post_deploy {
+                                    let pkg_target = pending
+                                        .iter()
+                                        .find(|pp| pp.pkg_name == *prev_pkg)
+                                        .map(|pp| &pp.pkg_target)
+                                        .unwrap();
+                                    if let Err(e) =
+                                        crate::hooks::run_hook(cmd, pkg_target, prev_pkg, "deploy")
+                                    {
+                                        eprintln!("warning: {e}");
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                // Run pre_deploy for the new package
-                if !dry_run {
-                    if let Some(pkg_config) = self.loader.root().packages.get(&p.pkg_name) {
-                        if let Some(ref cmd) = pkg_config.pre_deploy {
-                            if let Err(e) =
-                                crate::hooks::run_hook(cmd, &p.pkg_target, &p.pkg_name, "deploy")
-                            {
-                                eprintln!(
-                                    "warning: pre_deploy hook failed, skipping package '{}': {e}",
-                                    p.pkg_name
-                                );
-                                skip_pkg = Some(p.pkg_name.clone());
-                                current_pkg = Some(p.pkg_name.clone());
-                                continue;
-                            }
-                        }
-                    }
-                }
-                skip_pkg = None;
-                current_pkg = Some(p.pkg_name.clone());
-            }
-
-            // Skip all files for a package whose pre_deploy hook failed
-            if skip_pkg.as_deref() == Some(&p.pkg_name) {
-                report.conflicts.push((
-                    p.pkg_target.join(&p.action.target_rel_path),
-                    "skipped: pre_deploy hook failed".to_string(),
-                ));
-                continue;
-            }
-
-            let target_path = p.pkg_target.join(&p.action.target_rel_path);
-
-            // Determine if this is a user-mode symlink deployment
-            let use_symlink = !p.is_system
-                && (p.action.kind == scanner::EntryKind::Base
-                    || p.action.kind == scanner::EntryKind::Override);
-
-            // Drift detection: only for copies (templates + system-mode files)
-            if !use_symlink && target_path.exists() {
-                if let Some(&expected_hash) = existing_hashes.get(&target_path) {
-                    let current_hash = hash::hash_file(&target_path)?;
-                    if current_hash != expected_hash && !force {
-                        eprintln!(
-                            "warning: {} has been modified since last deploy, skipping (use --force to overwrite)",
-                            p.action.target_rel_path.display()
-                        );
-                        report
-                            .conflicts
-                            .push((target_path, "modified since last deploy".to_string()));
-                        continue;
-                    }
-                }
-            }
-
-            // Determine the effective force flag based on the orchestrator decision tree
-            let effective_force = if existing_targets.contains(&target_path) {
-                // Target is in existing state -- managed re-deploy: skip backup
-                true
-            } else if target_path.exists() && !target_path.is_symlink() && !target_path.is_dir() {
-                // Unmanaged regular file -- backup to originals, pass user's force value
-                force
-            } else {
-                // Symlink, directory, or nonexistent -- pass through
-                force
-            };
-
-            let is_managed = existing_targets.contains(&target_path);
-
-            // Backup pre-existing file content and metadata before deploying
-            // Skip backup for managed re-deploys (preserve the original pre-dotm content)
-            let (original_hash, original_owner, original_group, original_mode) =
-                if !dry_run && !is_managed && target_path.exists() && !target_path.is_symlink() {
-                    let content = std::fs::read(&target_path)?;
-                    let hash = hash::hash_content(&content);
-                    state.store_original(&hash, &content)?;
-
-                    let (owner, group, mode) = metadata::read_file_metadata(&target_path)?;
-                    (Some(hash), Some(owner), Some(group), Some(mode))
-                } else {
-                    (None, None, None, None)
-                };
-
-            // Deploy using the appropriate method
-            let result = if use_symlink {
-                deployer::deploy_symlink(&p.action, &p.pkg_target, dry_run, effective_force)?
-            } else {
-                deployer::deploy_copy(
-                    &p.action,
-                    &p.pkg_target,
-                    dry_run,
-                    effective_force,
-                    p.rendered.as_deref(),
-                )?
-            };
-
-            match result {
-                DeployResult::Created | DeployResult::Updated => {
-                    // For content_hash: hash the source file for symlinks, hash the target file for copies
-                    let content_hash = if !dry_run {
-                        if use_symlink {
-                            hash::hash_file(&p.action.source)?
-                        } else {
-                            hash::hash_file(&target_path)?
-                        }
-                    } else {
-                        String::new()
-                    };
-
-                    // Resolve and apply metadata (only for system-mode packages)
-                    let resolved = if !dry_run && p.is_system {
+                    // Run pre_deploy for the new package
+                    if !dry_run {
                         if let Some(pkg_config) = self.loader.root().packages.get(&p.pkg_name) {
-                            let rel_path_str = p.action.target_rel_path.to_str().unwrap_or("");
-                            let resolved = metadata::resolve_metadata(pkg_config, rel_path_str);
-
-                            if resolved.owner.is_some() || resolved.group.is_some() {
-                                if let Err(e) = metadata::apply_ownership(
-                                    &target_path,
-                                    resolved.owner.as_deref(),
-                                    resolved.group.as_deref(),
+                            if let Some(ref cmd) = pkg_config.pre_deploy {
+                                if let Err(e) = crate::hooks::run_hook(
+                                    cmd,
+                                    &p.pkg_target,
+                                    &p.pkg_name,
+                                    "deploy",
                                 ) {
                                     eprintln!(
-                                        "warning: failed to set ownership on {}: {e}",
-                                        target_path.display()
+                                        "warning: pre_deploy hook failed, skipping package '{}': {e}",
+                                        p.pkg_name
                                     );
+                                    skip_pkg = Some(p.pkg_name.clone());
+                                    current_pkg = Some(p.pkg_name.clone());
+                                    return Ok(());
                                 }
                             }
-
-                            if let Some(ref mode) = resolved.mode {
-                                deployer::apply_permission_override(&target_path, mode)?;
-                            }
-
-                            resolved
-                        } else {
-                            metadata::resolve_metadata(&crate::config::PackageConfig::default(), "")
                         }
-                    } else {
-                        metadata::resolve_metadata(&crate::config::PackageConfig::default(), "")
-                    };
+                    }
+                    skip_pkg = None;
+                    current_pkg = Some(p.pkg_name.clone());
+                }
 
-                    let abs_source = std::fs::canonicalize(&p.action.source)
-                        .unwrap_or_else(|_| p.action.source.clone());
+                // Skip all files for a package whose pre_deploy hook failed
+                if skip_pkg.as_deref() == Some(&p.pkg_name) {
+                    report.conflicts.push((
+                        p.pkg_target.join(&p.action.target_rel_path),
+                        "skipped: pre_deploy hook failed".to_string(),
+                    ));
+                    return Ok(());
+                }
 
-                    state.record(DeployEntry {
-                        target: target_path.clone(),
-                        staged: None,
-                        source: abs_source,
-                        content_hash,
-                        original_hash,
-                        kind: p.action.kind,
-                        package: p.pkg_name.clone(),
-                        owner: resolved.owner,
-                        group: resolved.group,
-                        mode: resolved.mode,
-                        original_owner,
-                        original_group,
-                        original_mode,
-                    });
+                let target_path = p.pkg_target.join(&p.action.target_rel_path);
 
-                    if matches!(result, DeployResult::Updated) {
-                        report.updated.push(target_path.clone());
-                    } else {
-                        report.created.push(target_path.clone());
+                // Determine if this is a user-mode symlink deployment
+                let use_symlink = !p.is_system
+                    && (p.action.kind == scanner::EntryKind::Base
+                        || p.action.kind == scanner::EntryKind::Override);
+
+                // Drift detection: only for copies (templates + system-mode files)
+                if !use_symlink && target_path.exists() {
+                    if let Some(&expected_hash) = existing_hashes.get(&target_path) {
+                        let current_hash = hash::hash_file(&target_path)?;
+                        if current_hash != expected_hash && !force {
+                            eprintln!(
+                                "warning: {} has been modified since last deploy, skipping (use --force to overwrite)",
+                                p.action.target_rel_path.display()
+                            );
+                            report
+                                .conflicts
+                                .push((target_path, "modified since last deploy".to_string()));
+                            return Ok(());
+                        }
                     }
                 }
-                DeployResult::Conflict(msg) => {
-                    report.conflicts.push((target_path, msg));
+
+                // Determine the effective force flag based on the orchestrator decision tree
+                let effective_force = if existing_targets.contains(&target_path) {
+                    // Target is in existing state -- managed re-deploy: skip backup
+                    true
+                } else if target_path.exists() && !target_path.is_symlink() && !target_path.is_dir()
+                {
+                    // Unmanaged regular file -- backup to originals, pass user's force value
+                    force
+                } else {
+                    // Symlink, directory, or nonexistent -- pass through
+                    force
+                };
+
+                let is_managed = existing_targets.contains(&target_path);
+
+                // Backup pre-existing file content and metadata before deploying
+                // Skip backup for managed re-deploys (preserve the original pre-dotm content)
+                let (original_hash, original_owner, original_group, original_mode) =
+                    if !dry_run && !is_managed && target_path.exists() && !target_path.is_symlink()
+                    {
+                        let content = std::fs::read(&target_path)?;
+                        let hash = hash::hash_content(&content);
+                        state.store_original(&hash, &content)?;
+
+                        let (owner, group, mode) = metadata::read_file_metadata(&target_path)?;
+                        (Some(hash), Some(owner), Some(group), Some(mode))
+                    } else {
+                        (None, None, None, None)
+                    };
+
+                // Deploy using the appropriate method
+                let result = if use_symlink {
+                    deployer::deploy_symlink(&p.action, &p.pkg_target, dry_run, effective_force)?
+                } else {
+                    deployer::deploy_copy(
+                        &p.action,
+                        &p.pkg_target,
+                        dry_run,
+                        effective_force,
+                        p.rendered.as_deref(),
+                    )?
+                };
+
+                match result {
+                    DeployResult::Created | DeployResult::Updated => {
+                        // For content_hash: hash the source file for symlinks, hash the target file for copies
+                        let content_hash = if !dry_run {
+                            if use_symlink {
+                                hash::hash_file(&p.action.source)?
+                            } else {
+                                hash::hash_file(&target_path)?
+                            }
+                        } else {
+                            String::new()
+                        };
+
+                        // Resolve and apply metadata (only for system-mode packages)
+                        let resolved = if !dry_run && p.is_system {
+                            if let Some(pkg_config) = self.loader.root().packages.get(&p.pkg_name) {
+                                let rel_path_str = p.action.target_rel_path.to_str().unwrap_or("");
+                                let resolved = metadata::resolve_metadata(pkg_config, rel_path_str);
+
+                                if resolved.owner.is_some() || resolved.group.is_some() {
+                                    if let Err(e) = metadata::apply_ownership(
+                                        &target_path,
+                                        resolved.owner.as_deref(),
+                                        resolved.group.as_deref(),
+                                    ) {
+                                        eprintln!(
+                                            "warning: failed to set ownership on {}: {e}",
+                                            target_path.display()
+                                        );
+                                    }
+                                }
+
+                                if let Some(ref mode) = resolved.mode {
+                                    deployer::apply_permission_override(&target_path, mode)?;
+                                }
+
+                                resolved
+                            } else {
+                                metadata::resolve_metadata(
+                                    &crate::config::PackageConfig::default(),
+                                    "",
+                                )
+                            }
+                        } else {
+                            metadata::resolve_metadata(&crate::config::PackageConfig::default(), "")
+                        };
+
+                        let abs_source = std::fs::canonicalize(&p.action.source)
+                            .unwrap_or_else(|_| p.action.source.clone());
+
+                        state.record(DeployEntry {
+                            target: target_path.clone(),
+                            staged: None,
+                            source: abs_source,
+                            content_hash,
+                            original_hash,
+                            kind: p.action.kind,
+                            package: p.pkg_name.clone(),
+                            owner: resolved.owner,
+                            group: resolved.group,
+                            mode: resolved.mode,
+                            original_owner,
+                            original_group,
+                            original_mode,
+                        });
+
+                        if matches!(result, DeployResult::Updated) {
+                            report.updated.push(target_path.clone());
+                        } else {
+                            report.created.push(target_path.clone());
+                        }
+                    }
+                    DeployResult::Conflict(msg) => {
+                        report.conflicts.push((target_path, msg));
+                    }
+                    DeployResult::DryRun => {
+                        report.dry_run_actions.push(target_path);
+                    }
+                    _ => {}
                 }
-                DeployResult::DryRun => {
-                    report.dry_run_actions.push(target_path);
-                }
-                _ => {}
+
+                Ok(())
+            })();
+
+            if let Err(e) = file_result {
+                deploy_error = Some(e);
+                break;
             }
         }
 
@@ -458,9 +476,13 @@ impl Orchestrator {
             }
         }
 
-        // Phase 5: Save state
+        // Phase 5: Save state (including partial state on error, so deployed files are tracked)
         if !dry_run && self.state_dir.is_some() {
             state.save()?;
+        }
+
+        if let Some(e) = deploy_error {
+            return Err(e);
         }
 
         Ok(report)
