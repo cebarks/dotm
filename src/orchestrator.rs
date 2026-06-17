@@ -435,7 +435,7 @@ impl Orchestrator {
 
         // Run post_deploy for the final package
         if let Some(ref last_pkg) = current_pkg {
-            if !dry_run && skip_pkg.as_deref() != Some(last_pkg) {
+            if !dry_run && skip_pkg.as_deref() != Some(last_pkg) && deploy_error.is_none() {
                 if let Some(pkg_config) = self.loader.root().packages.get(last_pkg) {
                     if let Some(ref cmd) = pkg_config.post_deploy {
                         let pkg_target = pending
