@@ -476,7 +476,13 @@ impl Orchestrator {
 
         // Phase 5: Save state (including partial state on error, so deployed files are tracked)
         if !dry_run && self.state_dir.is_some() {
-            state.save()?;
+            if deploy_error.is_some() {
+                if let Err(e) = state.save() {
+                    eprintln!("warning: failed to save partial state: {e}");
+                }
+            } else {
+                state.save()?;
+            }
         }
 
         if let Some(e) = deploy_error {
