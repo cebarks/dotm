@@ -63,6 +63,13 @@ fn collect_files(
                 .strip_prefix(base)
                 .expect("collected path must be under base directory")
                 .to_path_buf();
+            if rel_path.file_name().and_then(|n| n.to_str()).is_none() {
+                eprintln!(
+                    "warning: skipping non-UTF-8 filename: {}",
+                    rel_path.display()
+                );
+                continue;
+            }
             let canonical = canonical_target_path(&rel_path);
             files.entry(canonical).or_default().push(path);
         }
