@@ -215,6 +215,10 @@ impl DeployState {
         &self.entries
     }
 
+    pub fn remove_targets(&mut self, targets: &[PathBuf]) {
+        self.entries.retain(|e| !targets.contains(&e.target));
+    }
+
     pub fn entries_mut(&mut self) -> &mut [DeployEntry] {
         &mut self.entries
     }

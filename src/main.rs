@@ -779,7 +779,7 @@ fn main() -> anyhow::Result<()> {
             };
 
             // Load existing state to find what's currently managed
-            let existing_state = dotm::state::DeployState::load_locked(&state_dir)?;
+            let mut existing_state = dotm::state::DeployState::load_locked(&state_dir)?;
             if existing_state.entries().is_empty() {
                 println!("No files currently managed by dotm.");
                 return Ok(());
@@ -798,7 +798,7 @@ fn main() -> anyhow::Result<()> {
                 .chain(report.conflicts.iter().map(|(path, _)| path.clone()))
                 .collect();
 
-            let mut pruned = 0;
+            let mut pruned_targets = Vec::new();
             for entry in existing_state.entries() {
                 if !new_targets.contains(&entry.target) {
                     if dry_run {
@@ -809,10 +809,12 @@ fn main() -> anyhow::Result<()> {
                             dotm::state::cleanup_empty_parents(&entry.target);
                         }
                         println!("  - {}", entry.target.display());
+                        pruned_targets.push(entry.target.clone());
                     }
-                    pruned += 1;
                 }
             }
+
+            let pruned = pruned_targets.len();
 
             if dry_run {
                 if pruned > 0 {
@@ -821,8 +823,13 @@ fn main() -> anyhow::Result<()> {
                     println!("No orphaned files to prune.");
                 }
             } else if pruned > 0 {
-                // Re-deploy to update state without orphans
+                // Remove pruned entries from state before re-deploy so state
+                // stays consistent even if re-deploy fails
+                existing_state.remove_targets(&pruned_targets);
+                existing_state.save()?;
                 drop(existing_state); // release lock
+
+                // Re-deploy to update state without orphans
                 let mut orch2 = Orchestrator::new(&cli.dir, &target_dir)?
                     .with_state_dir(&state_dir)
                     .with_system_mode(system);
