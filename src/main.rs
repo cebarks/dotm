@@ -778,8 +778,10 @@ fn main() -> anyhow::Result<()> {
                 dotm_state_dir()
             };
 
-            // Load existing state to find what's currently managed
-            let mut existing_state = dotm::state::DeployState::load_locked(&state_dir)?;
+            // Load existing state to find what's currently managed.
+            // Use load() not load_locked() — the orchestrator's deploy() acquires
+            // its own lock, and holding two flock fds on the same file deadlocks.
+            let mut existing_state = dotm::state::DeployState::load(&state_dir)?;
             if existing_state.entries().is_empty() {
                 println!("No files currently managed by dotm.");
                 return Ok(());
