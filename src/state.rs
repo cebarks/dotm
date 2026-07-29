@@ -392,7 +392,9 @@ impl DeployState {
 
         if package_filter.is_some() {
             self.entries = remaining;
-            self.save()?;
+            if let Err(save_err) = self.save() {
+                eprintln!("warning: failed to save state after partial restore: {save_err}");
+            }
         } else if restore_error.is_none() {
             let originals = self.originals_dir();
             if originals.is_dir() {
