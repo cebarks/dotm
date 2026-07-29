@@ -818,27 +818,30 @@ fn main() -> anyhow::Result<()> {
                 }
             }
 
-            let pruned = orphan_count;
+            let orphans_found = orphan_count;
 
             if dry_run {
-                if pruned > 0 {
-                    println!("Dry run — would prune {pruned} orphaned files.");
+                if orphans_found > 0 {
+                    println!("Dry run — would prune {orphans_found} orphaned files.");
                 } else {
                     println!("No orphaned files to prune.");
                 }
-            } else if pruned > 0 {
+            } else if orphans_found > 0 {
                 // Remove pruned entries from state before re-deploy so state
                 // stays consistent even if re-deploy fails
+                // No lock held here — load() was used to avoid deadlock with
+                // orchestrator's deploy(). Narrow race if two dotm processes
+                // prune concurrently; acceptable for a single-user CLI tool.
                 existing_state.remove_targets(&pruned_targets);
                 existing_state.save()?;
-                drop(existing_state); // release lock
+                drop(existing_state);
 
                 // Re-deploy to update state without orphans
                 let mut orch2 = Orchestrator::new(&cli.dir, &target_dir)?
                     .with_state_dir(&state_dir)
                     .with_system_mode(system);
                 orch2.deploy(&hostname, false, true)?;
-                println!("Pruned {pruned} orphaned files.");
+                println!("Pruned {} orphaned files.", pruned_targets.len());
             } else {
                 println!("No orphaned files to prune.");
             }
