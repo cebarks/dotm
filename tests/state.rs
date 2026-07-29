@@ -336,3 +336,73 @@ fn undeploy_cleans_empty_target_directories() {
         "empty target parent should be cleaned up"
     );
 }
+
+#[test]
+fn restore_error_propagates_over_save_error() {
+    let state_dir = TempDir::new().unwrap();
+    let target_dir = TempDir::new().unwrap();
+
+    // Create a target that will fail to restore (parent dir doesn't exist
+    // and we'll make it so it can't be created)
+    let impossible_target = PathBuf::from("/nonexistent-root-dir/impossible/target");
+
+    let mut state = DeployState::new(state_dir.path());
+    state.record(DeployEntry {
+        target: impossible_target.clone(),
+        staged: None,
+        source: PathBuf::from("/source"),
+        content_hash: "hash".to_string(),
+        original_hash: Some("orig_hash".to_string()),
+        kind: EntryKind::Override,
+        package: "failing_pkg".to_string(),
+        owner: None,
+        group: None,
+        mode: None,
+        original_owner: None,
+        original_group: None,
+        original_mode: None,
+    });
+    // Add another package so filter is meaningful
+    state.record(DeployEntry {
+        target: target_dir.path().join("other.conf"),
+        staged: None,
+        source: PathBuf::from("/source2"),
+        content_hash: "hash2".to_string(),
+        original_hash: None,
+        kind: EntryKind::Base,
+        package: "other_pkg".to_string(),
+        owner: None,
+        group: None,
+        mode: None,
+        original_owner: None,
+        original_group: None,
+        original_mode: None,
+    });
+    // Store an "original" so restore tries to write it back
+    state
+        .store_original("orig_hash", b"original content")
+        .unwrap();
+    state.save().unwrap();
+
+    // Reload and attempt filtered restore — the restore will fail because
+    // it can't write to /nonexistent-root-dir/...
+    let mut loaded = DeployState::load(state_dir.path()).unwrap();
+
+    // Make state dir read-only (no write) so save() fails, but keep execute for reading subdirs
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(state_dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let result = loaded.restore(Some("failing_pkg"));
+
+    // Restore permissions for cleanup
+    let _ = std::fs::set_permissions(state_dir.path(), std::fs::Permissions::from_mode(0o755));
+
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    // The error should be about restore failure (loading original or writing target),
+    // not the save failure (temp state file)
+    assert!(
+        err_msg.contains("original content") || err_msg.contains("failed to restore"),
+        "expected restore error, got: {err_msg}"
+    );
+}
