@@ -477,6 +477,14 @@ impl Orchestrator {
         // Phase 5: Save state (including partial state on error, so deployed files are tracked)
         if !dry_run && self.state_dir.is_some() {
             if deploy_error.is_some() {
+                // Merge: keep old entries for targets we didn't deploy this run
+                let deployed_targets: HashSet<PathBuf> =
+                    state.entries().iter().map(|e| e.target.clone()).collect();
+                for old in existing_state.entries() {
+                    if !deployed_targets.contains(&old.target) {
+                        state.record(old.clone());
+                    }
+                }
                 if let Err(e) = state.save() {
                     eprintln!("warning: failed to save partial state: {e}");
                 }
