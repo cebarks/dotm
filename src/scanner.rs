@@ -36,8 +36,9 @@ pub fn scan_package(pkg_dir: &Path, hostname: &str, roles: &[&str]) -> Result<Ve
     let mut actions = Vec::new();
 
     for (target_path, variants) in &files {
-        let action = resolve_variant(target_path, variants, hostname, roles);
-        actions.push(action);
+        if let Some(action) = resolve_variant(target_path, variants, hostname, roles) {
+            actions.push(action);
+        }
     }
 
     actions.sort_by(|a, b| a.target_rel_path.cmp(&b.target_rel_path));
@@ -57,6 +58,13 @@ fn collect_files(
         let path = entry.path();
 
         if path.is_dir() {
+            if path.is_symlink() {
+                eprintln!(
+                    "warning: skipping symlink to directory: {}",
+                    path.strip_prefix(base).unwrap_or(&path).display()
+                );
+                continue;
+            }
             collect_files(base, &path, files)?;
         } else {
             let rel_path = path
@@ -111,12 +119,13 @@ fn canonical_target_path(rel_path: &Path) -> PathBuf {
 }
 
 /// Given all variants of a file, pick the best one for this host/roles.
+/// Returns None if no variant matches the current host/roles and no base file exists.
 fn resolve_variant(
     target_path: &Path,
     variants: &[PathBuf],
     hostname: &str,
     roles: &[&str],
-) -> FileAction {
+) -> Option<FileAction> {
     let host_suffix = format!("##host.{hostname}");
     let host_suffix_tera = format!("{host_suffix}.tera");
 
@@ -130,11 +139,11 @@ fn resolve_variant(
         } else {
             EntryKind::Override
         };
-        return FileAction {
+        return Some(FileAction {
             source: source.clone(),
             target_rel_path: target_path.to_path_buf(),
             kind,
-        };
+        });
     }
 
     // Priority 2: role override (last matching role wins)
@@ -150,11 +159,11 @@ fn resolve_variant(
             } else {
                 EntryKind::Override
             };
-            return FileAction {
+            return Some(FileAction {
                 source: source.clone(),
                 target_rel_path: target_path.to_path_buf(),
                 kind,
-            };
+            });
         }
     }
 
@@ -163,25 +172,23 @@ fn resolve_variant(
         let name = file_name_str(v);
         name.ends_with(".tera") && !name.contains("##")
     }) {
-        return FileAction {
+        return Some(FileAction {
             source: source.clone(),
             target_rel_path: target_path.to_path_buf(),
             kind: EntryKind::Template,
-        };
+        });
     }
 
     // Priority 4: plain base file
-    let source = variants
+    variants
         .iter()
         .find(|v| {
             let name = file_name_str(v);
             !name.contains("##") && !name.ends_with(".tera")
         })
-        .unwrap_or(&variants[0]);
-
-    FileAction {
-        source: source.clone(),
-        target_rel_path: target_path.to_path_buf(),
-        kind: EntryKind::Base,
-    }
+        .map(|source| FileAction {
+            source: source.clone(),
+            target_rel_path: target_path.to_path_buf(),
+            kind: EntryKind::Base,
+        })
 }

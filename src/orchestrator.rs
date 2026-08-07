@@ -17,6 +17,7 @@ pub struct Orchestrator {
     state_dir: Option<PathBuf>,
     system_mode: bool,
     package_filter: Option<String>,
+    no_hooks: bool,
 }
 
 #[derive(Debug, Default)]
@@ -47,6 +48,7 @@ impl Orchestrator {
             state_dir: None,
             system_mode: false,
             package_filter: None,
+            no_hooks: false,
         })
     }
 
@@ -62,6 +64,11 @@ impl Orchestrator {
 
     pub fn with_package_filter(mut self, filter: Option<String>) -> Self {
         self.package_filter = filter;
+        self
+    }
+
+    pub fn with_no_hooks(mut self, no_hooks: bool) -> Self {
+        self.no_hooks = no_hooks;
         self
     }
 
@@ -91,6 +98,7 @@ impl Orchestrator {
 
         // 2. Collect packages from roles
         let mut all_requested_packages: Vec<String> = Vec::new();
+        let mut seen_packages: HashSet<String> = HashSet::new();
 
         for role_name in &host.roles {
             let role = self
@@ -99,7 +107,7 @@ impl Orchestrator {
                 .with_context(|| format!("failed to load role '{role_name}'"))?;
 
             for pkg in &role.packages {
-                if !all_requested_packages.contains(pkg) {
+                if seen_packages.insert(pkg.clone()) {
                     all_requested_packages.push(pkg.clone());
                 }
             }
@@ -224,7 +232,7 @@ impl Orchestrator {
                 if current_pkg.as_deref() != Some(&p.pkg_name) {
                     // Run post_deploy for the previous package
                     if let Some(ref prev_pkg) = current_pkg {
-                        if !dry_run {
+                        if !dry_run && !self.no_hooks {
                             if let Some(pkg_config) = self.loader.root().packages.get(prev_pkg) {
                                 if let Some(ref cmd) = pkg_config.post_deploy {
                                     let pkg_target = pending
@@ -243,7 +251,7 @@ impl Orchestrator {
                     }
 
                     // Run pre_deploy for the new package
-                    if !dry_run {
+                    if !dry_run && !self.no_hooks {
                         if let Some(pkg_config) = self.loader.root().packages.get(&p.pkg_name) {
                             if let Some(ref cmd) = pkg_config.pre_deploy {
                                 if let Err(e) = crate::hooks::run_hook(
@@ -435,7 +443,11 @@ impl Orchestrator {
 
         // Run post_deploy for the final package
         if let Some(ref last_pkg) = current_pkg {
-            if !dry_run && skip_pkg.as_deref() != Some(last_pkg) && deploy_error.is_none() {
+            if !dry_run
+                && !self.no_hooks
+                && skip_pkg.as_deref() != Some(last_pkg)
+                && deploy_error.is_none()
+            {
                 if let Some(pkg_config) = self.loader.root().packages.get(last_pkg) {
                     if let Some(ref cmd) = pkg_config.post_deploy {
                         let pkg_target = pending
@@ -459,7 +471,20 @@ impl Orchestrator {
                 .map(|p| p.pkg_target.join(&p.action.target_rel_path))
                 .collect();
 
+            let resolved_set: HashSet<&str> = resolved.iter().map(|s| s.as_str()).collect();
+
             for old_entry in existing_state.entries() {
+                // When a --package filter is active, packages outside the
+                // filtered set were never candidates for (re)deploy this run,
+                // so their old entries must not be treated as orphaned. When
+                // there is no filter, a package missing from `resolved` means
+                // it was actually removed from the role/host config, and its
+                // old entries should still go through normal orphan detection.
+                if self.package_filter.is_some()
+                    && !resolved_set.contains(old_entry.package.as_str())
+                {
+                    continue;
+                }
                 if !new_targets.contains(&old_entry.target) {
                     report.orphaned.push(old_entry.target.clone());
 
@@ -476,15 +501,21 @@ impl Orchestrator {
 
         // Phase 5: Save state (including partial state on error, so deployed files are tracked)
         if !dry_run && self.state_dir.is_some() {
-            if deploy_error.is_some() {
-                // Merge: keep old entries for targets we didn't deploy this run
-                let deployed_targets: HashSet<PathBuf> =
-                    state.entries().iter().map(|e| e.target.clone()).collect();
-                for old in existing_state.entries() {
-                    if !deployed_targets.contains(&old.target) {
-                        state.record(old.clone());
-                    }
+            // Merge: keep old entries for targets we didn't deploy this run,
+            // but drop ones Phase 4.5 already flagged as orphaned so pruned
+            // (or prune-eligible) entries don't get resurrected.
+            let deployed_targets: HashSet<PathBuf> =
+                state.entries().iter().map(|e| e.target.clone()).collect();
+            let orphaned_targets: HashSet<&PathBuf> = report.orphaned.iter().collect();
+            for old in existing_state.entries() {
+                if !deployed_targets.contains(&old.target)
+                    && !orphaned_targets.contains(&old.target)
+                {
+                    state.record(old.clone());
                 }
+            }
+
+            if deploy_error.is_some() {
                 if let Err(e) = state.save() {
                     eprintln!("warning: failed to save partial state: {e}");
                 }

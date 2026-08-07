@@ -202,22 +202,27 @@ fn e2e_permission_override_applied() {
     use std::os::unix::fs::PermissionsExt;
 
     let dotfiles_tmp = TempDir::new().unwrap();
+    let target_tmp = TempDir::new().unwrap();
+    let target_dir = target_tmp.path();
 
     // Use a system package so metadata/permissions are applied
     std::fs::write(
         dotfiles_tmp.path().join("dotm.toml"),
-        r#"
+        format!(
+            r#"
 [dotm]
 target = "~"
 
 [packages.scripts]
 description = "Scripts"
 system = true
-target = "/tmp/e2e_perm_test"
+target = "{}"
 
 [packages.scripts.permissions]
 "bin/myscript" = "755"
 "#,
+            target_dir.display()
+        ),
     )
     .unwrap();
 
@@ -239,7 +244,6 @@ target = "/tmp/e2e_perm_test"
     )
     .unwrap();
 
-    let target_dir = Path::new("/tmp/e2e_perm_test");
     let state_dir = TempDir::new().unwrap();
     let mut orch = Orchestrator::new(dotfiles_tmp.path(), target_dir)
         .unwrap()
@@ -254,9 +258,6 @@ target = "/tmp/e2e_perm_test"
         0o755,
         "deployed file should have 755 permissions"
     );
-
-    // Clean up
-    let _ = std::fs::remove_dir_all(target_dir);
 }
 
 #[test]
@@ -348,7 +349,7 @@ fn e2e_deploy_undeploy_restores_clean_state() {
 
     // Undeploy
     let state = dotm::state::DeployState::load(state_dir.path()).unwrap();
-    state.undeploy().unwrap();
+    state.undeploy(None, dotfiles.path()).unwrap();
 
     // Target should be clean
     assert!(!target.path().join(".bashrc").exists());
@@ -381,6 +382,51 @@ fn e2e_redeploy_returns_updated() {
         report2.created.is_empty(),
         "redeploy should not return Created files"
     );
+}
+
+#[test]
+fn e2e_deploy_uses_config_target() {
+    let dotfiles_tmp = TempDir::new().unwrap();
+    let target = TempDir::new().unwrap();
+
+    // Config with explicit target pointing to our temp dir
+    std::fs::write(
+        dotfiles_tmp.path().join("dotm.toml"),
+        format!(
+            "[dotm]\ntarget = \"{}\"\n\n[packages.shell]\ndescription = \"Shell\"\n",
+            target.path().display()
+        ),
+    )
+    .unwrap();
+
+    let pkg_dir = dotfiles_tmp.path().join("packages/shell");
+    std::fs::create_dir_all(&pkg_dir).unwrap();
+    std::fs::write(pkg_dir.join(".bashrc"), "# shell config").unwrap();
+
+    std::fs::create_dir_all(dotfiles_tmp.path().join("hosts")).unwrap();
+    std::fs::write(
+        dotfiles_tmp.path().join("hosts/testhost.toml"),
+        "hostname = \"testhost\"\nroles = [\"all\"]\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dotfiles_tmp.path().join("roles")).unwrap();
+    std::fs::write(
+        dotfiles_tmp.path().join("roles/all.toml"),
+        "packages = [\"shell\"]\n",
+    )
+    .unwrap();
+
+    // Use the config target (via Orchestrator reading dotm.target)
+    let loader = dotm::loader::ConfigLoader::new(dotfiles_tmp.path()).unwrap();
+    let target_dir = std::path::PathBuf::from(
+        dotm::orchestrator::expand_path(&loader.root().dotm.target, None).unwrap(),
+    );
+
+    let mut orch = Orchestrator::new(dotfiles_tmp.path(), &target_dir).unwrap();
+    let report = orch.deploy("testhost", false, false).unwrap();
+
+    assert!(report.conflicts.is_empty());
+    assert!(target.path().join(".bashrc").exists());
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) {

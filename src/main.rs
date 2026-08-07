@@ -36,6 +36,9 @@ enum Commands {
         /// Deploy only this package (and its dependencies)
         #[arg(short, long)]
         package: Option<String>,
+        /// Skip pre/post deploy hooks
+        #[arg(long)]
+        no_hooks: bool,
     },
     /// Remove all managed symlinks and copies
     Undeploy {
@@ -45,6 +48,9 @@ enum Commands {
         /// Undeploy only this package
         #[arg(short, long)]
         package: Option<String>,
+        /// Skip pre/post deploy hooks
+        #[arg(long)]
+        no_hooks: bool,
     },
     /// Show deployment status
     Status {
@@ -155,6 +161,9 @@ enum Commands {
         /// Operate on system packages (requires root)
         #[arg(long)]
         system: bool,
+        /// Skip pre/post deploy hooks
+        #[arg(long)]
+        no_hooks: bool,
     },
 }
 
@@ -183,6 +192,11 @@ enum ListWhat {
     },
 }
 
+fn resolve_target_dir(config_target: &str) -> anyhow::Result<std::path::PathBuf> {
+    let expanded = dotm::orchestrator::expand_path(config_target, Some("dotm.target"))?;
+    Ok(std::path::PathBuf::from(expanded))
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
@@ -193,6 +207,7 @@ fn main() -> anyhow::Result<()> {
             force,
             system,
             package,
+            no_hooks,
         } => {
             let hostname = match host {
                 Some(h) => h,
@@ -204,10 +219,8 @@ fn main() -> anyhow::Result<()> {
                     }),
             };
 
-            let target_dir = dirs::home_dir().unwrap_or_else(|| {
-                eprintln!("error: could not determine home directory");
-                std::process::exit(1);
-            });
+            let loader = dotm::loader::ConfigLoader::new(&cli.dir)?;
+            let target_dir = resolve_target_dir(&loader.root().dotm.target)?;
 
             let state_dir = if system {
                 check_system_privileges();
@@ -219,7 +232,8 @@ fn main() -> anyhow::Result<()> {
             let mut orch = Orchestrator::new(&cli.dir, &target_dir)?
                 .with_state_dir(&state_dir)
                 .with_system_mode(system)
-                .with_package_filter(package);
+                .with_package_filter(package)
+                .with_no_hooks(no_hooks);
 
             if system && !orch.loader().root().packages.values().any(|p| p.system) {
                 println!("no system packages configured");
@@ -316,7 +330,11 @@ fn main() -> anyhow::Result<()> {
                 println!("Restored {} files.", restored);
             }
         }
-        Commands::Undeploy { system, package } => {
+        Commands::Undeploy {
+            system,
+            package,
+            no_hooks,
+        } => {
             let state_dir = if system {
                 check_system_privileges();
                 system_state_dir()
@@ -324,10 +342,21 @@ fn main() -> anyhow::Result<()> {
                 dotm_state_dir()
             };
             let mut state = dotm::state::DeployState::load_locked(&state_dir)?;
-            let removed = if let Some(ref pkg) = package {
-                state.undeploy_package(pkg)?
+
+            // Load config for undeploy hooks (optional — hooks skipped if config
+            // unavailable, or if --no-hooks was passed)
+            let packages = if no_hooks {
+                None
             } else {
-                state.undeploy()?
+                dotm::loader::ConfigLoader::new(&cli.dir)
+                    .ok()
+                    .map(|l| l.root().packages.clone())
+            };
+
+            let removed = if let Some(ref pkg) = package {
+                state.undeploy_package(pkg, packages.as_ref(), &cli.dir)?
+            } else {
+                state.undeploy(packages.as_ref(), &cli.dir)?
             };
             println!("Removed {removed} managed files.");
         }
@@ -393,11 +422,7 @@ fn main() -> anyhow::Result<()> {
             if short {
                 dotm::status::print_short(total, modified, missing, color);
             } else {
-                if verbose || package.is_some() {
-                    dotm::status::print_status_verbose(&groups, color);
-                } else {
-                    dotm::status::print_status_default(&groups, color);
-                }
+                dotm::status::print_status(&groups, color, verbose || package.is_some());
                 println!();
                 dotm::status::print_footer(total, modified, missing, color);
 
@@ -422,7 +447,13 @@ fn main() -> anyhow::Result<()> {
 
             // Try to load config for full diff support
             let config_context: Option<toml::map::Map<String, toml::Value>> = (|| {
-                let loader = dotm::loader::ConfigLoader::new(&cli.dir).ok()?;
+                let loader = match dotm::loader::ConfigLoader::new(&cli.dir) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        eprintln!("warning: could not load config: {e}");
+                        return None;
+                    }
+                };
                 let hostname = host.clone().or_else(|| {
                     hostname::get()
                         .ok()
@@ -431,8 +462,15 @@ fn main() -> anyhow::Result<()> {
                 dotm::vars::resolve_vars_lenient(&loader, &hostname)
             })();
 
-            if config_context.is_none() && !state.entries().is_empty() {
-                eprintln!("warning: could not load dotfiles config; showing drift status only");
+            if config_context.is_none()
+                && state
+                    .entries()
+                    .iter()
+                    .any(|e| e.kind == dotm::scanner::EntryKind::Template)
+            {
+                eprintln!(
+                    "warning: could not resolve template variables; showing drift status only for templates"
+                );
             }
 
             for entry in state.entries() {
@@ -607,16 +645,14 @@ fn main() -> anyhow::Result<()> {
             }
 
             let pkg_config = &loader.root().packages[&package];
+            let global_target = resolve_target_dir(&loader.root().dotm.target)?;
             let target_dir = if let Some(ref target) = pkg_config.target {
                 PathBuf::from(dotm::orchestrator::expand_path(
                     target,
                     Some(&format!("package '{package}'")),
                 )?)
             } else {
-                dirs::home_dir().unwrap_or_else(|| {
-                    eprintln!("error: could not determine home directory");
-                    std::process::exit(1);
-                })
+                global_target
             };
 
             let packages_dir = loader.packages_dir();
@@ -766,10 +802,8 @@ fn main() -> anyhow::Result<()> {
                     }),
             };
 
-            let target_dir = dirs::home_dir().unwrap_or_else(|| {
-                eprintln!("error: could not determine home directory");
-                std::process::exit(1);
-            });
+            let loader = dotm::loader::ConfigLoader::new(&cli.dir)?;
+            let target_dir = resolve_target_dir(&loader.root().dotm.target)?;
 
             let state_dir = if system {
                 check_system_privileges();
@@ -851,6 +885,7 @@ fn main() -> anyhow::Result<()> {
             no_push,
             force,
             system,
+            no_hooks,
         } => {
             let git_repo = dotm::git::GitRepo::open(&cli.dir)
                 .ok_or_else(|| anyhow::anyhow!("dotfiles directory is not a git repository"))?;
@@ -892,10 +927,8 @@ fn main() -> anyhow::Result<()> {
                     }),
             };
 
-            let target_dir = dirs::home_dir().unwrap_or_else(|| {
-                eprintln!("error: could not determine home directory");
-                std::process::exit(1);
-            });
+            let loader = dotm::loader::ConfigLoader::new(&cli.dir)?;
+            let target_dir = resolve_target_dir(&loader.root().dotm.target)?;
 
             let state_dir = if system {
                 check_system_privileges();
@@ -906,7 +939,8 @@ fn main() -> anyhow::Result<()> {
 
             let mut orch = Orchestrator::new(&cli.dir, &target_dir)?
                 .with_state_dir(&state_dir)
-                .with_system_mode(system);
+                .with_system_mode(system)
+                .with_no_hooks(no_hooks);
 
             if system && !orch.loader().root().packages.values().any(|p| p.system) {
                 println!("no system packages configured");

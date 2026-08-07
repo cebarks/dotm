@@ -260,3 +260,58 @@ fn scan_tera_override_has_priority_over_base() {
         rendered.source.display()
     );
 }
+
+#[test]
+fn scan_skips_file_when_only_non_matching_overrides_exist() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let pkg_dir = tmp.path();
+
+    // Create only host/role overrides — no base file
+    let config_dir = pkg_dir.join(".config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("app.conf##host.prodserver"), "prod config").unwrap();
+    std::fs::write(config_dir.join("app.conf##role.server"), "server config").unwrap();
+
+    // Deploy for a host/role that matches neither
+    let actions = scan_package(pkg_dir, "devbox", &["desktop"]).unwrap();
+
+    // Should NOT deploy app.conf — no matching variant exists
+    let app = actions
+        .iter()
+        .find(|a| a.target_rel_path.to_str() == Some(".config/app.conf"));
+    assert!(
+        app.is_none(),
+        "should not deploy a file when no variant matches, got: {:?}",
+        app.map(|a| a.source.display().to_string())
+    );
+}
+
+#[test]
+fn scan_warns_on_symlink_directory() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let pkg_dir = tmp.path();
+
+    // Create a real file
+    std::fs::write(pkg_dir.join(".bashrc"), "content").unwrap();
+
+    // Create a symlink to an external directory
+    let external = tempfile::TempDir::new().unwrap();
+    std::fs::write(external.path().join("secret.conf"), "secret").unwrap();
+    std::os::unix::fs::symlink(external.path(), pkg_dir.join("linked_dir")).unwrap();
+
+    let actions = scan_package(pkg_dir, "host", &[]).unwrap();
+
+    // Should NOT have scanned into the symlinked directory
+    assert!(
+        actions
+            .iter()
+            .all(|a| !a.source.to_str().unwrap().contains("secret.conf")),
+        "should not traverse symlinked directories"
+    );
+    // Should still have the regular file
+    assert!(
+        actions
+            .iter()
+            .any(|a| a.target_rel_path.to_str() == Some(".bashrc"))
+    );
+}

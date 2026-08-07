@@ -72,59 +72,6 @@ fn display_path(path: &Path) -> String {
     path.display().to_string()
 }
 
-pub fn render_default(groups: &[PackageStatus]) -> String {
-    let mut out = String::new();
-
-    for pkg in groups {
-        out.push_str(&format!(
-            "{} ({}, {})\n",
-            pkg.name,
-            files_label(pkg.total),
-            status_summary(pkg),
-        ));
-
-        for file in &pkg.files {
-            if file.status.is_missing() {
-                out.push_str(&format!("  ! {}\n", file.display_path));
-            } else if file.status.is_modified() {
-                out.push_str(&format!("  M {}\n", file.display_path));
-            } else if file.status.has_metadata_drift() {
-                out.push_str(&format!("  P {}\n", file.display_path));
-            }
-        }
-    }
-
-    out
-}
-
-pub fn render_verbose(groups: &[PackageStatus]) -> String {
-    let mut out = String::new();
-
-    for pkg in groups {
-        out.push_str(&format!(
-            "{} ({}, {})\n",
-            pkg.name,
-            files_label(pkg.total),
-            status_summary(pkg),
-        ));
-
-        for file in &pkg.files {
-            let marker = if file.status.is_missing() {
-                "!"
-            } else if file.status.is_modified() {
-                "M"
-            } else if file.status.has_metadata_drift() {
-                "P"
-            } else {
-                "~"
-            };
-            out.push_str(&format!("  {} {}\n", marker, file.display_path));
-        }
-    }
-
-    out
-}
-
 pub fn render_short(total: usize, modified: usize, missing: usize) -> String {
     let _ = total;
     if modified == 0 && missing == 0 {
@@ -186,7 +133,7 @@ pub fn use_color() -> bool {
     std::env::var("NO_COLOR").is_err() && std::io::stdout().is_terminal()
 }
 
-pub fn print_status_default(groups: &[PackageStatus], color: bool) {
+pub fn print_status(groups: &[PackageStatus], color: bool, verbose: bool) {
     for pkg in groups {
         let summary = format!("({}, {})", files_label(pkg.total), status_summary(pkg));
 
@@ -221,50 +168,12 @@ pub fn print_status_default(groups: &[PackageStatus], color: bool) {
                 } else {
                     println!("  P {}", file.display_path);
                 }
-            }
-        }
-    }
-}
-
-pub fn print_status_verbose(groups: &[PackageStatus], color: bool) {
-    for pkg in groups {
-        let summary = format!("({}, {})", files_label(pkg.total), status_summary(pkg));
-
-        if color {
-            if pkg.modified == 0 && pkg.missing == 0 {
-                println!("{} {}", pkg.name, summary.green());
-            } else if pkg.missing > 0 {
-                println!("{} {}", pkg.name, summary.red());
-            } else {
-                println!("{} {}", pkg.name, summary.yellow());
-            }
-        } else {
-            println!("{} {}", pkg.name, summary);
-        }
-
-        for file in &pkg.files {
-            if file.status.is_missing() {
+            } else if verbose {
                 if color {
-                    println!("  {} {}", "!".red(), file.display_path);
+                    println!("  {} {}", "~".green(), file.display_path);
                 } else {
-                    println!("  ! {}", file.display_path);
+                    println!("  ~ {}", file.display_path);
                 }
-            } else if file.status.is_modified() {
-                if color {
-                    println!("  {} {}", "M".yellow(), file.display_path);
-                } else {
-                    println!("  M {}", file.display_path);
-                }
-            } else if file.status.has_metadata_drift() {
-                if color {
-                    println!("  {} {}", "P".yellow(), file.display_path);
-                } else {
-                    println!("  P {}", file.display_path);
-                }
-            } else if color {
-                println!("  {} {}", "~".green(), file.display_path);
-            } else {
-                println!("  ~ {}", file.display_path);
             }
         }
     }
@@ -395,52 +304,6 @@ mod tests {
         let grouped = group_by_package(&entries, &statuses);
         let names: Vec<&str> = grouped.iter().map(|g| g.name.as_str()).collect();
         assert_eq!(names, vec!["bin", "gaming", "zsh"]);
-    }
-
-    #[test]
-    fn render_default_shows_package_headers() {
-        let entries = vec![
-            make_entry("/home/user/.bashrc", "shell", "h1"),
-            make_entry("/home/user/.config/app.conf", "desktop", "h2"),
-        ];
-        let statuses = vec![
-            FileStatus::ok(),
-            FileStatus {
-                content_modified: true,
-                ..FileStatus::ok()
-            },
-        ];
-        let grouped = group_by_package(&entries, &statuses);
-        let output = render_default(&grouped);
-        assert!(output.contains("shell"));
-        assert!(output.contains("desktop"));
-        assert!(output.contains("1 modified"));
-        assert!(output.contains("M "));
-        assert!(output.contains("app.conf"));
-    }
-
-    #[test]
-    fn render_default_hides_ok_files() {
-        let entries = vec![make_entry("/home/user/.bashrc", "shell", "h1")];
-        let statuses = vec![FileStatus::ok()];
-        let grouped = group_by_package(&entries, &statuses);
-        let output = render_default(&grouped);
-        assert!(output.contains("shell"));
-        assert!(output.contains("ok"));
-        assert!(!output.contains(".bashrc"));
-    }
-
-    #[test]
-    fn render_verbose_shows_all_files() {
-        let entries = vec![
-            make_entry("/home/user/.bashrc", "shell", "h1"),
-            make_entry("/home/user/.zshrc", "shell", "h2"),
-        ];
-        let statuses = vec![FileStatus::ok(), FileStatus::ok()];
-        let grouped = group_by_package(&entries, &statuses);
-        let output = render_verbose(&grouped);
-        assert!(output.contains(".bashrc"));
-        assert!(output.contains(".zshrc"));
     }
 
     #[test]

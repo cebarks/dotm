@@ -105,3 +105,70 @@ fn partial_deploy_error_preserves_unreached_state_entries() {
         "partial save must preserve unreached entries from previous state"
     );
 }
+
+#[test]
+fn filtered_deploy_preserves_other_packages_state() {
+    let target_dir = TempDir::new().unwrap();
+    let state_dir = TempDir::new().unwrap();
+    let dotfiles_dir = Path::new("tests/fixtures/basic");
+
+    // First: full deploy of all packages
+    let mut orch = Orchestrator::new(dotfiles_dir, target_dir.path())
+        .unwrap()
+        .with_state_dir(state_dir.path());
+    let report = orch.deploy("testhost", false, false).unwrap();
+    assert!(report.conflicts.is_empty());
+    let full_count = report.created.len();
+    assert!(full_count >= 2, "need at least 2 files from 2 packages");
+
+    // Verify state has entries for both packages
+    let state_before = dotm::state::DeployState::load(state_dir.path()).unwrap();
+    let packages_before: std::collections::HashSet<&str> = state_before
+        .entries()
+        .iter()
+        .map(|e| e.package.as_str())
+        .collect();
+    assert!(
+        packages_before.contains("shell"),
+        "state should contain shell package"
+    );
+    assert!(
+        packages_before.contains("editor"),
+        "state should contain editor package"
+    );
+
+    // Second: filtered deploy of only 'shell'
+    let mut orch2 = Orchestrator::new(dotfiles_dir, target_dir.path())
+        .unwrap()
+        .with_state_dir(state_dir.path())
+        .with_package_filter(Some("shell".to_string()));
+    let report2 = orch2.deploy("testhost", false, false).unwrap();
+    assert!(report2.conflicts.is_empty());
+
+    // State must still have entries for BOTH packages
+    let state_after = dotm::state::DeployState::load(state_dir.path()).unwrap();
+    let packages_after: std::collections::HashSet<&str> = state_after
+        .entries()
+        .iter()
+        .map(|e| e.package.as_str())
+        .collect();
+    assert!(
+        packages_after.contains("editor"),
+        "filtered deploy must preserve editor package state"
+    );
+    assert!(
+        packages_after.contains("shell"),
+        "filtered deploy must contain shell package state"
+    );
+    assert_eq!(
+        state_after.entries().len(),
+        full_count,
+        "filtered deploy must not lose any state entries"
+    );
+
+    // Editor files must still exist on disk (not orphan-pruned)
+    assert!(
+        target_dir.path().join(".config/nvim/init.lua").exists(),
+        "editor files must not be deleted by filtered deploy"
+    );
+}
