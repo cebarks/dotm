@@ -260,3 +260,28 @@ fn scan_tera_override_has_priority_over_base() {
         rendered.source.display()
     );
 }
+
+#[test]
+fn scan_skips_file_when_only_non_matching_overrides_exist() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let pkg_dir = tmp.path();
+
+    // Create only host/role overrides — no base file
+    let config_dir = pkg_dir.join(".config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("app.conf##host.prodserver"), "prod config").unwrap();
+    std::fs::write(config_dir.join("app.conf##role.server"), "server config").unwrap();
+
+    // Deploy for a host/role that matches neither
+    let actions = scan_package(pkg_dir, "devbox", &["desktop"]).unwrap();
+
+    // Should NOT deploy app.conf — no matching variant exists
+    let app = actions
+        .iter()
+        .find(|a| a.target_rel_path.to_str() == Some(".config/app.conf"));
+    assert!(
+        app.is_none(),
+        "should not deploy a file when no variant matches, got: {:?}",
+        app.map(|a| a.source.display().to_string())
+    );
+}
