@@ -462,6 +462,17 @@ fn main() -> anyhow::Result<()> {
                 dotm::vars::resolve_vars_lenient(&loader, &hostname)
             })();
 
+            if config_context.is_none()
+                && state
+                    .entries()
+                    .iter()
+                    .any(|e| e.kind == dotm::scanner::EntryKind::Template)
+            {
+                eprintln!(
+                    "warning: could not resolve template variables; showing drift status only for templates"
+                );
+            }
+
             for entry in state.entries() {
                 if let Some(ref filter) = path {
                     if !entry.target.to_str().unwrap_or("").contains(filter) {

@@ -418,6 +418,11 @@ impl DeployState {
     }
 
     /// Remove managed files for a single package and save updated state.
+    ///
+    /// `cwd` is the working directory for hook execution. Note: deploy hooks
+    /// run from the package's target directory, but undeploy hooks run from
+    /// whatever `cwd` the caller provides (typically the dotfiles source dir),
+    /// since the target directory may be partially torn down during undeploy.
     pub fn undeploy_package(
         &mut self,
         package: &str,
@@ -468,6 +473,10 @@ impl DeployState {
     }
 
     /// Remove all managed files and return a count of removed files.
+    ///
+    /// `cwd` is the working directory for hook execution (see
+    /// [`undeploy_package`](Self::undeploy_package) for details on the
+    /// asymmetry with deploy hooks).
     pub fn undeploy(
         &self,
         packages: Option<&HashMap<String, crate::config::PackageConfig>>,
