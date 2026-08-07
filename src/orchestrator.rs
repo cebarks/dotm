@@ -17,6 +17,7 @@ pub struct Orchestrator {
     state_dir: Option<PathBuf>,
     system_mode: bool,
     package_filter: Option<String>,
+    no_hooks: bool,
 }
 
 #[derive(Debug, Default)]
@@ -47,6 +48,7 @@ impl Orchestrator {
             state_dir: None,
             system_mode: false,
             package_filter: None,
+            no_hooks: false,
         })
     }
 
@@ -62,6 +64,11 @@ impl Orchestrator {
 
     pub fn with_package_filter(mut self, filter: Option<String>) -> Self {
         self.package_filter = filter;
+        self
+    }
+
+    pub fn with_no_hooks(mut self, no_hooks: bool) -> Self {
+        self.no_hooks = no_hooks;
         self
     }
 
@@ -224,7 +231,7 @@ impl Orchestrator {
                 if current_pkg.as_deref() != Some(&p.pkg_name) {
                     // Run post_deploy for the previous package
                     if let Some(ref prev_pkg) = current_pkg {
-                        if !dry_run {
+                        if !dry_run && !self.no_hooks {
                             if let Some(pkg_config) = self.loader.root().packages.get(prev_pkg) {
                                 if let Some(ref cmd) = pkg_config.post_deploy {
                                     let pkg_target = pending
@@ -243,7 +250,7 @@ impl Orchestrator {
                     }
 
                     // Run pre_deploy for the new package
-                    if !dry_run {
+                    if !dry_run && !self.no_hooks {
                         if let Some(pkg_config) = self.loader.root().packages.get(&p.pkg_name) {
                             if let Some(ref cmd) = pkg_config.pre_deploy {
                                 if let Err(e) = crate::hooks::run_hook(
@@ -435,7 +442,11 @@ impl Orchestrator {
 
         // Run post_deploy for the final package
         if let Some(ref last_pkg) = current_pkg {
-            if !dry_run && skip_pkg.as_deref() != Some(last_pkg) && deploy_error.is_none() {
+            if !dry_run
+                && !self.no_hooks
+                && skip_pkg.as_deref() != Some(last_pkg)
+                && deploy_error.is_none()
+            {
                 if let Some(pkg_config) = self.loader.root().packages.get(last_pkg) {
                     if let Some(ref cmd) = pkg_config.post_deploy {
                         let pkg_target = pending

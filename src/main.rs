@@ -36,6 +36,9 @@ enum Commands {
         /// Deploy only this package (and its dependencies)
         #[arg(short, long)]
         package: Option<String>,
+        /// Skip pre/post deploy hooks
+        #[arg(long)]
+        no_hooks: bool,
     },
     /// Remove all managed symlinks and copies
     Undeploy {
@@ -45,6 +48,9 @@ enum Commands {
         /// Undeploy only this package
         #[arg(short, long)]
         package: Option<String>,
+        /// Skip pre/post deploy hooks
+        #[arg(long)]
+        no_hooks: bool,
     },
     /// Show deployment status
     Status {
@@ -155,6 +161,9 @@ enum Commands {
         /// Operate on system packages (requires root)
         #[arg(long)]
         system: bool,
+        /// Skip pre/post deploy hooks
+        #[arg(long)]
+        no_hooks: bool,
     },
 }
 
@@ -198,6 +207,7 @@ fn main() -> anyhow::Result<()> {
             force,
             system,
             package,
+            no_hooks,
         } => {
             let hostname = match host {
                 Some(h) => h,
@@ -222,7 +232,8 @@ fn main() -> anyhow::Result<()> {
             let mut orch = Orchestrator::new(&cli.dir, &target_dir)?
                 .with_state_dir(&state_dir)
                 .with_system_mode(system)
-                .with_package_filter(package);
+                .with_package_filter(package)
+                .with_no_hooks(no_hooks);
 
             if system && !orch.loader().root().packages.values().any(|p| p.system) {
                 println!("no system packages configured");
@@ -319,7 +330,11 @@ fn main() -> anyhow::Result<()> {
                 println!("Restored {} files.", restored);
             }
         }
-        Commands::Undeploy { system, package } => {
+        Commands::Undeploy {
+            system,
+            package,
+            no_hooks,
+        } => {
             let state_dir = if system {
                 check_system_privileges();
                 system_state_dir()
@@ -328,10 +343,15 @@ fn main() -> anyhow::Result<()> {
             };
             let mut state = dotm::state::DeployState::load_locked(&state_dir)?;
 
-            // Load config for undeploy hooks (optional — hooks skipped if config unavailable)
-            let packages = dotm::loader::ConfigLoader::new(&cli.dir)
-                .ok()
-                .map(|l| l.root().packages.clone());
+            // Load config for undeploy hooks (optional — hooks skipped if config
+            // unavailable, or if --no-hooks was passed)
+            let packages = if no_hooks {
+                None
+            } else {
+                dotm::loader::ConfigLoader::new(&cli.dir)
+                    .ok()
+                    .map(|l| l.root().packages.clone())
+            };
 
             let removed = if let Some(ref pkg) = package {
                 state.undeploy_package(pkg, packages.as_ref(), &cli.dir)?
@@ -856,6 +876,7 @@ fn main() -> anyhow::Result<()> {
             no_push,
             force,
             system,
+            no_hooks,
         } => {
             let git_repo = dotm::git::GitRepo::open(&cli.dir)
                 .ok_or_else(|| anyhow::anyhow!("dotfiles directory is not a git repository"))?;
@@ -909,7 +930,8 @@ fn main() -> anyhow::Result<()> {
 
             let mut orch = Orchestrator::new(&cli.dir, &target_dir)?
                 .with_state_dir(&state_dir)
-                .with_system_mode(system);
+                .with_system_mode(system)
+                .with_no_hooks(no_hooks);
 
             if system && !orch.loader().root().packages.values().any(|p| p.system) {
                 println!("no system packages configured");
