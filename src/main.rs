@@ -422,11 +422,7 @@ fn main() -> anyhow::Result<()> {
             if short {
                 dotm::status::print_short(total, modified, missing, color);
             } else {
-                if verbose || package.is_some() {
-                    dotm::status::print_status_verbose(&groups, color);
-                } else {
-                    dotm::status::print_status_default(&groups, color);
-                }
+                dotm::status::print_status(&groups, color, verbose || package.is_some());
                 println!();
                 dotm::status::print_footer(total, modified, missing, color);
 
@@ -451,7 +447,13 @@ fn main() -> anyhow::Result<()> {
 
             // Try to load config for full diff support
             let config_context: Option<toml::map::Map<String, toml::Value>> = (|| {
-                let loader = dotm::loader::ConfigLoader::new(&cli.dir).ok()?;
+                let loader = match dotm::loader::ConfigLoader::new(&cli.dir) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        eprintln!("warning: could not load config: {e}");
+                        return None;
+                    }
+                };
                 let hostname = host.clone().or_else(|| {
                     hostname::get()
                         .ok()
@@ -459,10 +461,6 @@ fn main() -> anyhow::Result<()> {
                 })?;
                 dotm::vars::resolve_vars_lenient(&loader, &hostname)
             })();
-
-            if config_context.is_none() && !state.entries().is_empty() {
-                eprintln!("warning: could not load dotfiles config; showing drift status only");
-            }
 
             for entry in state.entries() {
                 if let Some(ref filter) = path {

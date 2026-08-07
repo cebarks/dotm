@@ -69,8 +69,10 @@ fn undeploy_package_runs_hooks() {
     state.save().unwrap();
 
     // Build package config with hooks
-    let mut pkg_config = dotm::config::PackageConfig::default();
-    pkg_config.pre_undeploy = Some(format!("touch {}", marker.display()));
+    let pkg_config = dotm::config::PackageConfig {
+        pre_undeploy: Some(format!("touch {}", marker.display())),
+        ..Default::default()
+    };
 
     let mut packages = std::collections::HashMap::new();
     packages.insert("mypkg".to_string(), pkg_config);

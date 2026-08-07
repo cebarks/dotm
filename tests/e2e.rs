@@ -202,22 +202,27 @@ fn e2e_permission_override_applied() {
     use std::os::unix::fs::PermissionsExt;
 
     let dotfiles_tmp = TempDir::new().unwrap();
+    let target_tmp = TempDir::new().unwrap();
+    let target_dir = target_tmp.path();
 
     // Use a system package so metadata/permissions are applied
     std::fs::write(
         dotfiles_tmp.path().join("dotm.toml"),
-        r#"
+        format!(
+            r#"
 [dotm]
 target = "~"
 
 [packages.scripts]
 description = "Scripts"
 system = true
-target = "/tmp/e2e_perm_test"
+target = "{}"
 
 [packages.scripts.permissions]
 "bin/myscript" = "755"
 "#,
+            target_dir.display()
+        ),
     )
     .unwrap();
 
@@ -239,7 +244,6 @@ target = "/tmp/e2e_perm_test"
     )
     .unwrap();
 
-    let target_dir = Path::new("/tmp/e2e_perm_test");
     let state_dir = TempDir::new().unwrap();
     let mut orch = Orchestrator::new(dotfiles_tmp.path(), target_dir)
         .unwrap()
@@ -254,9 +258,6 @@ target = "/tmp/e2e_perm_test"
         0o755,
         "deployed file should have 755 permissions"
     );
-
-    // Clean up
-    let _ = std::fs::remove_dir_all(target_dir);
 }
 
 #[test]

@@ -217,11 +217,8 @@ impl DeployState {
     }
 
     pub fn remove_targets(&mut self, targets: &[PathBuf]) {
-        self.entries.retain(|e| !targets.contains(&e.target));
-    }
-
-    pub fn entries_mut(&mut self) -> &mut [DeployEntry] {
-        &mut self.entries
+        let target_set: std::collections::HashSet<&PathBuf> = targets.iter().collect();
+        self.entries.retain(|e| !target_set.contains(&e.target));
     }
 
     pub fn update_entry_hash(&mut self, index: usize, new_hash: String) {

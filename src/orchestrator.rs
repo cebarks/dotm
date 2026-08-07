@@ -98,6 +98,7 @@ impl Orchestrator {
 
         // 2. Collect packages from roles
         let mut all_requested_packages: Vec<String> = Vec::new();
+        let mut seen_packages: HashSet<String> = HashSet::new();
 
         for role_name in &host.roles {
             let role = self
@@ -106,7 +107,7 @@ impl Orchestrator {
                 .with_context(|| format!("failed to load role '{role_name}'"))?;
 
             for pkg in &role.packages {
-                if !all_requested_packages.contains(pkg) {
+                if seen_packages.insert(pkg.clone()) {
                     all_requested_packages.push(pkg.clone());
                 }
             }
