@@ -58,6 +58,13 @@ fn collect_files(
         let path = entry.path();
 
         if path.is_dir() {
+            if path.is_symlink() {
+                eprintln!(
+                    "warning: skipping symlink to directory: {}",
+                    path.strip_prefix(base).unwrap_or(&path).display()
+                );
+                continue;
+            }
             collect_files(base, &path, files)?;
         } else {
             let rel_path = path
