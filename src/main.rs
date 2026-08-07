@@ -183,6 +183,11 @@ enum ListWhat {
     },
 }
 
+fn resolve_target_dir(config_target: &str) -> anyhow::Result<std::path::PathBuf> {
+    let expanded = dotm::orchestrator::expand_path(config_target, Some("dotm.target"))?;
+    Ok(std::path::PathBuf::from(expanded))
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
@@ -204,10 +209,8 @@ fn main() -> anyhow::Result<()> {
                     }),
             };
 
-            let target_dir = dirs::home_dir().unwrap_or_else(|| {
-                eprintln!("error: could not determine home directory");
-                std::process::exit(1);
-            });
+            let loader = dotm::loader::ConfigLoader::new(&cli.dir)?;
+            let target_dir = resolve_target_dir(&loader.root().dotm.target)?;
 
             let state_dir = if system {
                 check_system_privileges();
@@ -607,16 +610,14 @@ fn main() -> anyhow::Result<()> {
             }
 
             let pkg_config = &loader.root().packages[&package];
+            let global_target = resolve_target_dir(&loader.root().dotm.target)?;
             let target_dir = if let Some(ref target) = pkg_config.target {
                 PathBuf::from(dotm::orchestrator::expand_path(
                     target,
                     Some(&format!("package '{package}'")),
                 )?)
             } else {
-                dirs::home_dir().unwrap_or_else(|| {
-                    eprintln!("error: could not determine home directory");
-                    std::process::exit(1);
-                })
+                global_target
             };
 
             let packages_dir = loader.packages_dir();
@@ -766,10 +767,8 @@ fn main() -> anyhow::Result<()> {
                     }),
             };
 
-            let target_dir = dirs::home_dir().unwrap_or_else(|| {
-                eprintln!("error: could not determine home directory");
-                std::process::exit(1);
-            });
+            let loader = dotm::loader::ConfigLoader::new(&cli.dir)?;
+            let target_dir = resolve_target_dir(&loader.root().dotm.target)?;
 
             let state_dir = if system {
                 check_system_privileges();
@@ -892,10 +891,8 @@ fn main() -> anyhow::Result<()> {
                     }),
             };
 
-            let target_dir = dirs::home_dir().unwrap_or_else(|| {
-                eprintln!("error: could not determine home directory");
-                std::process::exit(1);
-            });
+            let loader = dotm::loader::ConfigLoader::new(&cli.dir)?;
+            let target_dir = resolve_target_dir(&loader.root().dotm.target)?;
 
             let state_dir = if system {
                 check_system_privileges();

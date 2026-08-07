@@ -12,11 +12,16 @@ pub struct RootConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct DotmSettings {
+    #[serde(default = "default_target")]
     pub target: String,
     #[serde(default = "default_packages_dir")]
     pub packages_dir: String,
     #[serde(default)]
     pub auto_prune: bool,
+}
+
+fn default_target() -> String {
+    "~".to_string()
 }
 
 fn default_packages_dir() -> String {
