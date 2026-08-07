@@ -85,3 +85,51 @@ fn auto_prune_removes_orphaned_files() {
     // The orphaned symlink should be gone
     assert!(!target.path().join(".config/nvim/init.lua").exists());
 }
+
+#[test]
+fn auto_prune_removes_orphaned_entries_from_state() {
+    let target = TempDir::new().unwrap();
+    let dotfiles = TempDir::new().unwrap();
+    let state_dir = TempDir::new().unwrap();
+
+    copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
+
+    // Enable auto_prune in config
+    let config = std::fs::read_to_string(dotfiles.path().join("dotm.toml")).unwrap();
+    let config = config.replace(
+        "[dotm]\ntarget = \"~\"",
+        "[dotm]\ntarget = \"~\"\nauto_prune = true",
+    );
+    std::fs::write(dotfiles.path().join("dotm.toml"), config).unwrap();
+
+    let mut orch = Orchestrator::new(dotfiles.path(), target.path())
+        .unwrap()
+        .with_state_dir(state_dir.path());
+    orch.deploy("testhost", false, false).unwrap();
+
+    // Remove editor from dev role
+    std::fs::write(dotfiles.path().join("roles/dev.toml"), "packages = []\n").unwrap();
+
+    // Redeploy with auto_prune — orphan should be pruned, not resurrected in state
+    let mut orch2 = Orchestrator::new(dotfiles.path(), target.path())
+        .unwrap()
+        .with_state_dir(state_dir.path());
+    let report = orch2.deploy("testhost", false, false).unwrap();
+    assert!(!report.pruned.is_empty(), "should prune orphaned files");
+
+    let state = dotm::state::DeployState::load(state_dir.path()).unwrap();
+    assert!(
+        !state.entries().iter().any(|e| e.package == "editor"),
+        "pruned editor entry must not be resurrected in persisted state"
+    );
+
+    // Redeploying again must not re-detect or re-prune the same (already-gone) file
+    let mut orch3 = Orchestrator::new(dotfiles.path(), target.path())
+        .unwrap()
+        .with_state_dir(state_dir.path());
+    let report3 = orch3.deploy("testhost", false, false).unwrap();
+    assert!(
+        report3.orphaned.is_empty(),
+        "already-pruned entry must not resurface as orphaned on the next deploy"
+    );
+}

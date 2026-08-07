@@ -489,12 +489,17 @@ impl Orchestrator {
 
         // Phase 5: Save state (including partial state on error, so deployed files are tracked)
         if !dry_run && self.state_dir.is_some() {
+            let orphaned_targets: HashSet<&PathBuf> = report.orphaned.iter().collect();
             if deploy_error.is_some() {
-                // Merge: keep old entries for targets we didn't deploy this run
+                // Merge: keep old entries for targets we didn't deploy this run,
+                // but drop ones Phase 4.5 already flagged as orphaned so pruned
+                // (or prune-eligible) entries don't get resurrected.
                 let deployed_targets: HashSet<PathBuf> =
                     state.entries().iter().map(|e| e.target.clone()).collect();
                 for old in existing_state.entries() {
-                    if !deployed_targets.contains(&old.target) {
+                    if !deployed_targets.contains(&old.target)
+                        && !orphaned_targets.contains(&old.target)
+                    {
                         state.record(old.clone());
                     }
                 }
@@ -502,11 +507,15 @@ impl Orchestrator {
                     eprintln!("warning: failed to save partial state: {e}");
                 }
             } else {
-                // Merge: keep old entries for packages we didn't deploy this run
+                // Merge: keep old entries for packages we didn't deploy this run,
+                // but drop ones Phase 4.5 already flagged as orphaned so pruned
+                // (or prune-eligible) entries don't get resurrected.
                 let deployed_targets: HashSet<PathBuf> =
                     state.entries().iter().map(|e| e.target.clone()).collect();
                 for old in existing_state.entries() {
-                    if !deployed_targets.contains(&old.target) {
+                    if !deployed_targets.contains(&old.target)
+                        && !orphaned_targets.contains(&old.target)
+                    {
                         state.record(old.clone());
                     }
                 }
