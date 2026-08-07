@@ -490,7 +490,7 @@ dependencies = [
 
 [[package]]
 name = "dotm-rs"
-version = "2.2.1"
+version = "2.3.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
