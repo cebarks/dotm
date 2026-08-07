@@ -406,3 +406,57 @@ fn restore_error_propagates_over_save_error() {
         "expected restore error, got: {err_msg}"
     );
 }
+
+#[test]
+fn restore_writes_back_original_content() {
+    let target_dir = TempDir::new().unwrap();
+    let temp_base = TempDir::new().unwrap();
+    // Use a state_dir path that contains ".dotm" to skip migration
+    let state_dir = temp_base.path().join(".dotm");
+    std::fs::create_dir_all(&state_dir).unwrap();
+
+    let target_path = target_dir.path().join("test.conf");
+
+    // Simulate pre-dotm state: target has original content
+    let original_content = b"original config content";
+    let original_hash = dotm::hash::hash_content(original_content);
+
+    // Write deployed content (overwritten by dotm)
+    std::fs::write(&target_path, "deployed by dotm").unwrap();
+
+    let mut state = DeployState::new(&state_dir);
+
+    // Store original backup
+    state
+        .store_original(&original_hash, original_content)
+        .unwrap();
+
+    // Record the deployed entry with original_hash
+    state.record(DeployEntry {
+        target: target_path.clone(),
+        staged: None,
+        source: PathBuf::from("/source/test.conf"),
+        content_hash: dotm::hash::hash_content(b"deployed by dotm"),
+        original_hash: Some(original_hash),
+        kind: EntryKind::Override,
+        package: "test_pkg".to_string(),
+        owner: None,
+        group: None,
+        mode: None,
+        original_owner: None,
+        original_group: None,
+        original_mode: None,
+    });
+    state.save().unwrap();
+
+    // Restore
+    let mut loaded = DeployState::load(&state_dir).unwrap();
+    let count = loaded.restore(None).unwrap();
+
+    assert_eq!(count, 1);
+    let restored_content = std::fs::read(&target_path).unwrap();
+    assert_eq!(
+        restored_content, original_content,
+        "restored content should match original"
+    );
+}
