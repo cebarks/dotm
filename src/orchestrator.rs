@@ -459,7 +459,20 @@ impl Orchestrator {
                 .map(|p| p.pkg_target.join(&p.action.target_rel_path))
                 .collect();
 
+            let resolved_set: HashSet<&str> = resolved.iter().map(|s| s.as_str()).collect();
+
             for old_entry in existing_state.entries() {
+                // When a --package filter is active, packages outside the
+                // filtered set were never candidates for (re)deploy this run,
+                // so their old entries must not be treated as orphaned. When
+                // there is no filter, a package missing from `resolved` means
+                // it was actually removed from the role/host config, and its
+                // old entries should still go through normal orphan detection.
+                if self.package_filter.is_some()
+                    && !resolved_set.contains(old_entry.package.as_str())
+                {
+                    continue;
+                }
                 if !new_targets.contains(&old_entry.target) {
                     report.orphaned.push(old_entry.target.clone());
 
@@ -489,6 +502,14 @@ impl Orchestrator {
                     eprintln!("warning: failed to save partial state: {e}");
                 }
             } else {
+                // Merge: keep old entries for packages we didn't deploy this run
+                let deployed_targets: HashSet<PathBuf> =
+                    state.entries().iter().map(|e| e.target.clone()).collect();
+                for old in existing_state.entries() {
+                    if !deployed_targets.contains(&old.target) {
+                        state.record(old.clone());
+                    }
+                }
                 state.save()?;
             }
         }
