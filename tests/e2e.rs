@@ -348,7 +348,7 @@ fn e2e_deploy_undeploy_restores_clean_state() {
 
     // Undeploy
     let state = dotm::state::DeployState::load(state_dir.path()).unwrap();
-    state.undeploy().unwrap();
+    state.undeploy(None, dotfiles.path()).unwrap();
 
     // Target should be clean
     assert!(!target.path().join(".bashrc").exists());

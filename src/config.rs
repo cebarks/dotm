@@ -35,7 +35,7 @@ pub enum DeployStrategy {
     Copy,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Clone)]
 pub struct PackageConfig {
     pub description: Option<String>,
     #[serde(default)]

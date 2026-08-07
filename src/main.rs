@@ -327,10 +327,16 @@ fn main() -> anyhow::Result<()> {
                 dotm_state_dir()
             };
             let mut state = dotm::state::DeployState::load_locked(&state_dir)?;
+
+            // Load config for undeploy hooks (optional — hooks skipped if config unavailable)
+            let packages = dotm::loader::ConfigLoader::new(&cli.dir)
+                .ok()
+                .map(|l| l.root().packages.clone());
+
             let removed = if let Some(ref pkg) = package {
-                state.undeploy_package(pkg)?
+                state.undeploy_package(pkg, packages.as_ref(), &cli.dir)?
             } else {
-                state.undeploy()?
+                state.undeploy(packages.as_ref(), &cli.dir)?
             };
             println!("Removed {removed} managed files.");
         }

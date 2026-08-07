@@ -3,6 +3,7 @@ use crate::scanner::EntryKind;
 use anyhow::{Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -414,7 +415,21 @@ impl DeployState {
     }
 
     /// Remove managed files for a single package and save updated state.
-    pub fn undeploy_package(&mut self, package: &str) -> Result<usize> {
+    pub fn undeploy_package(
+        &mut self,
+        package: &str,
+        packages: Option<&HashMap<String, crate::config::PackageConfig>>,
+        cwd: &Path,
+    ) -> Result<usize> {
+        // Run pre_undeploy hook
+        if let Some(pkgs) = packages {
+            if let Some(pkg_config) = pkgs.get(package) {
+                if let Some(ref cmd) = pkg_config.pre_undeploy {
+                    crate::hooks::run_hook(cmd, cwd, package, "undeploy")?;
+                }
+            }
+        }
+
         let mut removed = 0;
         let mut remaining = Vec::new();
 
@@ -435,11 +450,48 @@ impl DeployState {
         self.entries = remaining;
         self.save()?;
 
+        // Run post_undeploy hook
+        if let Some(pkgs) = packages {
+            if let Some(pkg_config) = pkgs.get(package) {
+                if let Some(ref cmd) = pkg_config.post_undeploy {
+                    if let Err(e) = crate::hooks::run_hook(cmd, cwd, package, "undeploy") {
+                        eprintln!("warning: {e}");
+                    }
+                }
+            }
+        }
+
         Ok(removed)
     }
 
     /// Remove all managed files and return a count of removed files.
-    pub fn undeploy(&self) -> Result<usize> {
+    pub fn undeploy(
+        &self,
+        packages: Option<&HashMap<String, crate::config::PackageConfig>>,
+        cwd: &Path,
+    ) -> Result<usize> {
+        // Collect unique packages (preserving first-seen order). Entries may not
+        // be contiguous per-package (e.g. after state merges), so hooks are run
+        // in two separate passes rather than tracked during removal.
+        let mut unique_packages: Vec<&str> = Vec::new();
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for entry in &self.entries {
+            if seen.insert(&entry.package) {
+                unique_packages.push(&entry.package);
+            }
+        }
+
+        // Run all pre_undeploy hooks (propagate errors — abort if any hook fails)
+        if let Some(pkgs) = packages {
+            for pkg_name in &unique_packages {
+                if let Some(pkg_config) = pkgs.get(*pkg_name) {
+                    if let Some(ref cmd) = pkg_config.pre_undeploy {
+                        crate::hooks::run_hook(cmd, cwd, pkg_name, "undeploy")?;
+                    }
+                }
+            }
+        }
+
         let mut removed = 0;
 
         for entry in &self.entries {
@@ -462,6 +514,19 @@ impl DeployState {
         let state_path = self.state_dir.join(STATE_FILE);
         if state_path.exists() {
             std::fs::remove_file(&state_path)?;
+        }
+
+        // Run all post_undeploy hooks (warn on error — files already removed)
+        if let Some(pkgs) = packages {
+            for pkg_name in &unique_packages {
+                if let Some(pkg_config) = pkgs.get(*pkg_name) {
+                    if let Some(ref cmd) = pkg_config.post_undeploy {
+                        if let Err(e) = crate::hooks::run_hook(cmd, cwd, pkg_name, "undeploy") {
+                            eprintln!("warning: {e}");
+                        }
+                    }
+                }
+            }
         }
 
         Ok(removed)

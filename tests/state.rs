@@ -162,7 +162,7 @@ fn undeploy_removes_target() {
     });
     state.save().unwrap();
 
-    let removed = state.undeploy().unwrap();
+    let removed = state.undeploy(None, state_dir.path()).unwrap();
     assert_eq!(removed, 1);
     assert!(!target_path.exists());
     // Source should still exist (it's the dotfile source, not staged)
@@ -329,7 +329,7 @@ fn undeploy_cleans_empty_target_directories() {
     });
     state.save().unwrap();
 
-    state.undeploy().unwrap();
+    state.undeploy(None, state_dir.path()).unwrap();
     assert!(!target_path.exists());
     assert!(
         !target_parent.exists(),
