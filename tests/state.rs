@@ -460,3 +460,65 @@ fn restore_writes_back_original_content() {
         "restored content should match original"
     );
 }
+
+#[test]
+fn restore_unfiltered_saves_partial_progress_on_error() {
+    let target_dir = TempDir::new().unwrap();
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().join(".dotm");
+    std::fs::create_dir(&state_path).unwrap();
+
+    // Create a restorable file
+    let good_target = target_dir.path().join("good.conf");
+    std::fs::write(&good_target, "deployed").unwrap();
+
+    let mut state = DeployState::new(&state_path);
+
+    // Entry 1: will restore successfully (no original_hash → just remove)
+    state.record(DeployEntry {
+        target: good_target.clone(),
+        staged: None,
+        source: PathBuf::from("/source/good.conf"),
+        content_hash: "hash1".to_string(),
+        original_hash: None,
+        kind: EntryKind::Base,
+        package: "pkg_a".to_string(),
+        owner: None,
+        group: None,
+        mode: None,
+        original_owner: None,
+        original_group: None,
+        original_mode: None,
+    });
+
+    // Entry 2: will fail (original_hash but no stored original content)
+    state.record(DeployEntry {
+        target: PathBuf::from("/nonexistent-root-dir/bad.conf"),
+        staged: None,
+        source: PathBuf::from("/source/bad.conf"),
+        content_hash: "hash2".to_string(),
+        original_hash: Some("missing_orig".to_string()),
+        kind: EntryKind::Override,
+        package: "pkg_b".to_string(),
+        owner: None,
+        group: None,
+        mode: None,
+        original_owner: None,
+        original_group: None,
+        original_mode: None,
+    });
+    state.save().unwrap();
+
+    let mut loaded = DeployState::load(&state_path).unwrap();
+    let result = loaded.restore(None);
+    assert!(result.is_err());
+
+    // Reload state — only the failed entry should remain
+    let reloaded = DeployState::load(&state_path).unwrap();
+    assert_eq!(
+        reloaded.entries().len(),
+        1,
+        "partial progress: successfully-restored entries should be removed from state"
+    );
+    assert_eq!(reloaded.entries()[0].package, "pkg_b");
+}

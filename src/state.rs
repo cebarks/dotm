@@ -405,6 +405,12 @@ impl DeployState {
             if state_path.exists() {
                 std::fs::remove_file(&state_path)?;
             }
+        } else {
+            // Save partial progress — remove successfully-restored entries
+            self.entries = remaining;
+            if let Err(save_err) = self.save() {
+                eprintln!("warning: failed to save state after partial restore: {save_err}");
+            }
         }
 
         if let Some(e) = restore_error {
