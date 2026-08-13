@@ -78,6 +78,14 @@ enum Commands {
         #[arg(long)]
         system: bool,
     },
+    /// Adopt drifted changes from copy/override files back into dotfile sources
+    Adopt {
+        /// Operate on system packages (requires root)
+        #[arg(long)]
+        system: bool,
+        /// Filter to a specific file path
+        path: Option<String>,
+    },
     /// Validate configuration
     Check {
         /// Warn about undeployed suggested packages
@@ -523,6 +531,106 @@ fn main() -> anyhow::Result<()> {
 
             if !found_diffs {
                 println!("No modified files.");
+            }
+        }
+        Commands::Adopt { system, path } => {
+            let state_dir = if system {
+                check_system_privileges();
+                system_state_dir()
+            } else {
+                dotm_state_dir()
+            };
+            let mut state = dotm::state::DeployState::load_locked(&state_dir)?;
+            let mut adopted_count = 0;
+            let num_entries = state.entries().len();
+
+            for idx in 0..num_entries {
+                let (is_modified, is_symlink, is_template, source, target, _content_hash) = {
+                    let entry = &state.entries()[idx];
+                    let status = state.check_entry_status(entry);
+                    (
+                        status.is_modified(),
+                        entry.target.is_symlink(),
+                        entry.kind == dotm::scanner::EntryKind::Template,
+                        entry.source.clone(),
+                        entry.target.clone(),
+                        entry.content_hash.clone(),
+                    )
+                };
+
+                // Path filter
+                if let Some(ref filter) = path {
+                    if !target.to_str().unwrap_or("").contains(filter) {
+                        continue;
+                    }
+                }
+
+                // Skip symlinks — edits are already source edits
+                if is_symlink {
+                    continue;
+                }
+
+                if !is_modified {
+                    continue;
+                }
+
+                if is_template {
+                    eprintln!(
+                        "Skipping {} (template — edit the .tera source directly)",
+                        target.display()
+                    );
+                    continue;
+                }
+
+                // For copy/override entries: source = expected, target = drifted
+                let expected = match std::fs::read_to_string(&source) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!(
+                            "Skipping {} (could not read source: {})",
+                            target.display(),
+                            e
+                        );
+                        continue;
+                    }
+                };
+                let current = match std::fs::read_to_string(&target) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!(
+                            "Skipping {} (could not read target: {})",
+                            target.display(),
+                            e
+                        );
+                        continue;
+                    }
+                };
+
+                let file_label = target.to_str().unwrap_or("unknown");
+                match dotm::adopt::interactive_adopt(file_label, &expected, &current)? {
+                    Some(patched) => {
+                        // Write changes back to the source in the dotfiles repo
+                        std::fs::write(&source, &patched)?;
+                        // Re-copy to the target to keep it in sync
+                        std::fs::write(&target, &patched)?;
+
+                        let new_hash = dotm::hash::hash_content(patched.as_bytes());
+                        state.update_entry_hash(idx, new_hash);
+
+                        adopted_count += 1;
+                        println!("Adopted changes to {}", source.display());
+                    }
+                    None => {
+                        println!("Skipped {}", target.display());
+                    }
+                }
+            }
+
+            if adopted_count > 0 {
+                state.save()?;
+                println!("\nAdopted changes to {} file(s).", adopted_count);
+            } else {
+                println!("No changes adopted.");
             }
         }
         Commands::Check { warn_suggestions } => {

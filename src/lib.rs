@@ -1,3 +1,4 @@
+pub mod adopt;
 pub mod config;
 pub mod deployer;
 pub mod diff;
