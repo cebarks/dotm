@@ -152,7 +152,7 @@ Variable precedence: **host vars > role vars** (last role listed wins among role
 Override files sit next to the base file with a `##` suffix:
 
 | Pattern | Priority | Description |
-|---------|----------|-------------|
+| --------- | ---------- | ------------- |
 | `file##host.<hostname>` | 1 (highest) | Used only on the named host |
 | `file##role.<rolename>` | 2 | Used when the role is active |
 | `file.tera` | 3 | Tera template, rendered with vars |
@@ -329,7 +329,7 @@ dotm adopt             # interactively adopt external changes back into source
 Status markers:
 
 | Marker | Meaning |
-|--------|---------|
+| -------- | --------- |
 | `~` | File is OK (verbose mode only) |
 | `M` | Content has been modified since last deploy |
 | `!` | File is missing |
@@ -343,7 +343,7 @@ If a file was modified externally, re-deploying will skip it with a warning. Use
 dotm [OPTIONS] <COMMAND>
 
 Options:
-  -d, --dir <DIR>   Path to dotfiles directory [default: .]
+  -d, --dir <DIR>   Path to dotfiles directory (env: DOTM_DIR) [default: .]
   -V, --version     Print version
 
 Commands:
@@ -490,7 +490,7 @@ dotm sync --system             # sync system packages
 ## Comparison
 
 | Feature | dotm | GNU stow | yadm | dotter |
-|---------|------|----------|------|--------|
+| --------- | ------ | ---------- | ------ | -------- |
 | Symlink-based | Yes | Yes | Yes | Yes |
 | Role/profile system | Yes | No | No | Yes |
 | Host-specific overrides | Yes | No | Alt files | Yes |

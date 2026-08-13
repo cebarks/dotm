@@ -10,7 +10,7 @@ use std::path::PathBuf;
 )]
 struct Cli {
     /// Path to the dotfiles directory (default: current directory)
-    #[arg(short, long, default_value = ".")]
+    #[arg(short, long, env = "DOTM_DIR", default_value = ".")]
     dir: PathBuf,
 
     #[command(subcommand)]
