@@ -180,6 +180,37 @@ fn cli_list_hosts() {
 }
 
 #[test]
+fn cli_dotm_dir_env_var() {
+    let dotfiles = TempDir::new().unwrap();
+    copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
+
+    // Without --dir, DOTM_DIR env var should be used
+    Command::cargo_bin("dotm")
+        .unwrap()
+        .env("DOTM_DIR", dotfiles.path().to_str().unwrap())
+        .args(["list", "packages"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("shell"));
+}
+
+#[test]
+fn cli_dir_flag_overrides_dotm_dir_env() {
+    let dotfiles = TempDir::new().unwrap();
+    let empty = TempDir::new().unwrap();
+    copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
+
+    // --dir flag should take precedence over DOTM_DIR
+    Command::cargo_bin("dotm")
+        .unwrap()
+        .env("DOTM_DIR", empty.path().to_str().unwrap())
+        .args(["-d", dotfiles.path().to_str().unwrap(), "list", "packages"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("shell"));
+}
+
+#[test]
 fn cli_list_hosts_tree() {
     let dotfiles = TempDir::new().unwrap();
     copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
