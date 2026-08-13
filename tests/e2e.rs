@@ -429,6 +429,45 @@ fn e2e_deploy_uses_config_target() {
     assert!(target.path().join(".bashrc").exists());
 }
 
+#[test]
+fn e2e_deploy_with_exec_template_function() {
+    let target = TempDir::new().unwrap();
+    let dotfiles = use_fixture("exec_template");
+
+    let mut orch = Orchestrator::new(dotfiles.path(), target.path()).unwrap();
+    let report = orch.deploy("testhost", false, false).unwrap();
+
+    assert!(report.conflicts.is_empty());
+
+    let rendered = target.path().join(".config/env.conf");
+    assert!(rendered.exists(), "exec template output should exist");
+    assert!(
+        !rendered.is_symlink(),
+        "template should be a copy, not a symlink"
+    );
+
+    let content = std::fs::read_to_string(&rendered).unwrap();
+
+    // exec(command="whoami") should produce the current user
+    let expected_user = std::env::var("USER").unwrap();
+    assert!(
+        content.contains(&format!("user={expected_user}")),
+        "expected whoami output, got: {content}"
+    );
+
+    // exec(command="printf '42'") should produce 42
+    assert!(
+        content.contains("num=42"),
+        "expected printf output, got: {content}"
+    );
+
+    // vars and exec() should work together
+    assert!(
+        content.contains("mixed=hello-world"),
+        "expected mixed var+exec output, got: {content}"
+    );
+}
+
 fn copy_dir_recursive(src: &Path, dst: &Path) {
     for entry in std::fs::read_dir(src).unwrap() {
         let entry = entry.unwrap();
