@@ -1,0 +1,19 @@
+[dotm]
+target = "~"
+
+[packages.alpha]
+description = "Package with a passing inline setup command"
+setup = "echo alpha-ran"
+
+[packages.beta]
+description = "Package with a failing setup command"
+setup = "exit 5"
+
+[packages.gamma]
+description = "Package with a script-based setup command"
+setup = "scripts/run.sh"
+
+[packages.delta]
+description = "Package ordered after alpha"
+setup = "echo delta-ran"
+setup_after = ["alpha"]

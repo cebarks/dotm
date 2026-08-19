@@ -1,0 +1,2 @@
+hostname = "test-host"
+roles = ["all"]
