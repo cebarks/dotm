@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Setup command**: `dotm setup` runs one-time/occasional imperative package initialization tasks (package manager bundles, OS preference commands, dependency installs), independent from file deployment
+  - `setup`, `setup_shell`, `setup_after` fields in package config
+  - State tracking (`setup-state.json`) for idempotent re-runs, keyed on a SHA-256 hash of the setup command/script
+  - `--dry-run`, `--force`, `--list`, `--package`, `--system`, `--verbose` flags
+  - `--system` filters to packages with `system = true`, mirroring `deploy --system`
+  - `--package` filtering resolves `setup_after` dependencies transitively, not just `depends`
+  - `dotm check` validates `setup_after` references, empty `setup` fields, and full-path `setup_shell` executability
+  - `dotm list packages --verbose` shows each package's setup command
+
 ## 2.1.1
 
 ### Bug Fixes

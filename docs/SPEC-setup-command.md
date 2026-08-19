@@ -113,7 +113,8 @@ dotm setup
 
 # Run setup for specific package(s)
 dotm setup --package homebrew
-dotm setup -p homebrew -p macos-defaults
+# --package accepts one package per invocation (matches deploy --package);
+# run the command again for additional packages.
 
 # Dry run (show what would execute)
 dotm setup --dry-run

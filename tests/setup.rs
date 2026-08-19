@@ -14,11 +14,8 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
         } else {
             std::fs::copy(&src_path, &dst_path).unwrap();
             #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Ok(meta) = std::fs::metadata(&src_path) {
-                    let _ = std::fs::set_permissions(&dst_path, meta.permissions());
-                }
+            if let Ok(meta) = std::fs::metadata(&src_path) {
+                let _ = std::fs::set_permissions(&dst_path, meta.permissions());
             }
         }
     }
