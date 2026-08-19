@@ -20,7 +20,9 @@ pub struct SetupOrchestrator {
 #[derive(Debug, Default)]
 pub struct SetupReport {
     pub success: Vec<String>,
+    pub success_output: Vec<(String, Option<String>)>,
     pub failed: Vec<(String, Option<String>)>,
+    pub failed_output: Vec<(String, Option<String>)>,
     pub skipped: Vec<(String, &'static str)>,
     pub dry_run: Vec<(String, String, &'static str)>,
 }
@@ -124,11 +126,14 @@ impl SetupOrchestrator {
             };
             let succeeded = entry.status == SetupStatus::Success;
             let error = entry.error.clone();
+            let output = entry.output.clone();
             state.update(pkg_name.clone(), entry);
 
             if succeeded {
+                report.success_output.push((pkg_name.clone(), output));
                 report.success.push(pkg_name);
             } else {
+                report.failed_output.push((pkg_name.clone(), output));
                 report.failed.push((pkg_name, error));
                 break;
             }
@@ -1004,6 +1009,40 @@ target = "/tmp/dotm-system-fixture-target"
         let b_entry = entries.iter().find(|e| e.package == "b").unwrap();
         assert!(matches!(b_entry.status, SetupListStatus::Failed(_)));
         assert!(b_entry.error.is_some());
+    }
+
+    #[test]
+    fn report_carries_captured_output_for_failures() {
+        let dotfiles = TempDir::new().unwrap();
+        write_fixture(dotfiles.path());
+        let state_dir = TempDir::new().unwrap();
+
+        let loader = ConfigLoader::new(dotfiles.path()).unwrap();
+        let orch = test_orch(loader, state_dir.path());
+        let report = orch
+            .run("test-host", Some(vec!["b".to_string()]), false, false)
+            .unwrap();
+
+        assert_eq!(report.failed.len(), 1);
+        let (_, output_opt) = &report.failed_output[0];
+        let _ = output_opt;
+    }
+
+    #[test]
+    fn report_carries_captured_output_for_success() {
+        let dotfiles = TempDir::new().unwrap();
+        write_fixture(dotfiles.path());
+        let state_dir = TempDir::new().unwrap();
+
+        let loader = ConfigLoader::new(dotfiles.path()).unwrap();
+        let orch = test_orch(loader, state_dir.path());
+        let report = orch
+            .run("test-host", Some(vec!["a".to_string()]), false, false)
+            .unwrap();
+
+        assert_eq!(report.success.len(), 1);
+        let (_, output) = &report.success_output[0];
+        assert!(output.as_deref().unwrap().contains("setup-a"));
     }
 
     #[test]

@@ -486,8 +486,19 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
 
-                if verbose {
-                    // Verbose output placeholder — Task 11 wires real output printing.
+                for (pkg, output) in &report.success_output {
+                    if verbose {
+                        if let Some(out) = output {
+                            println!("--- {pkg} output ---");
+                            println!("{out}");
+                        }
+                    }
+                }
+                for (pkg, output) in &report.failed_output {
+                    if let Some(out) = output {
+                        eprintln!("--- {pkg} output ---");
+                        eprintln!("{out}");
+                    }
                 }
 
                 if !report.failed.is_empty() {
