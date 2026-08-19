@@ -142,6 +142,65 @@ impl SetupOrchestrator {
     }
 }
 
+#[derive(Debug)]
+pub struct SetupListEntry {
+    pub package: String,
+    pub command: String,
+    pub status: SetupListStatus,
+    pub error: Option<String>,
+}
+
+#[derive(Debug)]
+pub enum SetupListStatus {
+    NotRun,
+    Success(String),
+    Failed(String),
+    Changed,
+}
+
+impl SetupOrchestrator {
+    pub fn list(&self, hostname: &str) -> Result<Vec<SetupListEntry>> {
+        let state = SetupState::load(&self.state_dir)?;
+        let resolved = self.resolve_host_packages(hostname)?;
+        let packages_dir = self.loader.packages_dir();
+
+        let mut entries = Vec::new();
+        for pkg_name in resolved {
+            let Some(pkg_config) = self.loader.root().packages.get(&pkg_name) else {
+                continue;
+            };
+            if pkg_config.system != self.system_mode {
+                continue;
+            }
+            let Some(setup_cmd) = &pkg_config.setup else {
+                continue;
+            };
+
+            let pkg_dir = packages_dir.join(&pkg_name);
+            let current_hash = compute_setup_hash(&pkg_dir, setup_cmd)?;
+            let state_entry = state.get(&pkg_name);
+
+            let status = match state_entry {
+                None => SetupListStatus::NotRun,
+                Some(e) if e.script_hash != current_hash => SetupListStatus::Changed,
+                Some(e) if e.status == SetupStatus::Failed => {
+                    SetupListStatus::Failed(e.last_run.clone())
+                }
+                Some(e) => SetupListStatus::Success(e.last_run.clone()),
+            };
+
+            entries.push(SetupListEntry {
+                package: pkg_name,
+                command: setup_cmd.clone(),
+                status,
+                error: state_entry.and_then(|e| e.error.clone()),
+            });
+        }
+
+        Ok(entries)
+    }
+}
+
 /// Extend `packages` in place with the transitive closure of `setup_after`
 /// references reachable from the packages already in the list.
 fn expand_setup_after_closure(root: &RootConfig, packages: &mut Vec<String>) -> Result<()> {
@@ -865,5 +924,99 @@ target = "/tmp/dotm-system-fixture-target"
         );
         let report2 = orch2.run("test-host", None, false, false).unwrap();
         assert_eq!(report2.success, vec!["sys-pkg".to_string()]);
+    }
+
+    // --- List tests ---
+
+    #[test]
+    fn list_shows_not_run_for_fresh_packages() {
+        let dotfiles = TempDir::new().unwrap();
+        write_fixture(dotfiles.path());
+        let state_dir = TempDir::new().unwrap();
+
+        let loader = ConfigLoader::new(dotfiles.path()).unwrap();
+        let orch = test_orch(loader, state_dir.path());
+        let entries = orch.list("test-host").unwrap();
+
+        let names: Vec<&String> = entries.iter().map(|e| &e.package).collect();
+        assert!(names.contains(&&"a".to_string()));
+        assert!(!names.contains(&&"no-setup".to_string()));
+
+        let a_entry = entries.iter().find(|e| e.package == "a").unwrap();
+        assert!(matches!(a_entry.status, SetupListStatus::NotRun));
+    }
+
+    #[test]
+    fn list_shows_success_after_run() {
+        let dotfiles = TempDir::new().unwrap();
+        write_fixture(dotfiles.path());
+        let state_dir = TempDir::new().unwrap();
+
+        let loader = ConfigLoader::new(dotfiles.path()).unwrap();
+        let orch = test_orch(loader, state_dir.path());
+        orch.run("test-host", Some(vec!["a".to_string()]), false, false)
+            .unwrap();
+
+        let loader2 = ConfigLoader::new(dotfiles.path()).unwrap();
+        let orch2 = test_orch(loader2, state_dir.path());
+        let entries = orch2.list("test-host").unwrap();
+        let a_entry = entries.iter().find(|e| e.package == "a").unwrap();
+        assert!(matches!(a_entry.status, SetupListStatus::Success(_)));
+    }
+
+    #[test]
+    fn list_shows_changed_when_script_hash_differs() {
+        let dotfiles = TempDir::new().unwrap();
+        write_fixture(dotfiles.path());
+        let state_dir = TempDir::new().unwrap();
+
+        let loader = ConfigLoader::new(dotfiles.path()).unwrap();
+        let orch = test_orch(loader, state_dir.path());
+        orch.run("test-host", Some(vec!["a".to_string()]), false, false)
+            .unwrap();
+
+        let toml_path = dotfiles.path().join("dotm.toml");
+        let content = std::fs::read_to_string(&toml_path).unwrap();
+        let content = content.replace("echo setup-a", "echo setup-a-changed");
+        std::fs::write(&toml_path, content).unwrap();
+
+        let loader2 = ConfigLoader::new(dotfiles.path()).unwrap();
+        let orch2 = test_orch(loader2, state_dir.path());
+        let entries = orch2.list("test-host").unwrap();
+        let a_entry = entries.iter().find(|e| e.package == "a").unwrap();
+        assert!(matches!(a_entry.status, SetupListStatus::Changed));
+    }
+
+    #[test]
+    fn list_shows_failed_with_error() {
+        let dotfiles = TempDir::new().unwrap();
+        write_fixture(dotfiles.path());
+        let state_dir = TempDir::new().unwrap();
+
+        let loader = ConfigLoader::new(dotfiles.path()).unwrap();
+        let orch = test_orch(loader, state_dir.path());
+        orch.run("test-host", Some(vec!["b".to_string()]), false, false)
+            .unwrap();
+
+        let loader2 = ConfigLoader::new(dotfiles.path()).unwrap();
+        let orch2 = test_orch(loader2, state_dir.path());
+        let entries = orch2.list("test-host").unwrap();
+        let b_entry = entries.iter().find(|e| e.package == "b").unwrap();
+        assert!(matches!(b_entry.status, SetupListStatus::Failed(_)));
+        assert!(b_entry.error.is_some());
+    }
+
+    #[test]
+    fn list_respects_system_mode() {
+        let dotfiles = TempDir::new().unwrap();
+        write_system_fixture(dotfiles.path());
+        let state_dir = TempDir::new().unwrap();
+
+        let loader = ConfigLoader::new(dotfiles.path()).unwrap();
+        let orch = test_orch(loader, state_dir.path());
+        let entries = orch.list("test-host").unwrap();
+        let names: Vec<&String> = entries.iter().map(|e| &e.package).collect();
+        assert!(names.contains(&&"user-pkg".to_string()));
+        assert!(!names.contains(&&"sys-pkg".to_string()));
     }
 }
