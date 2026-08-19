@@ -1,4 +1,4 @@
-use dotm::config::{HostConfig, RoleConfig, RootConfig, validate_system_packages};
+use dotm::config::{HostConfig, RoleConfig, RootConfig, validate_setup, validate_system_packages};
 
 #[test]
 fn parse_minimal_root_config() {
@@ -328,4 +328,85 @@ description = "No setup"
     assert!(plain.setup.is_none());
     assert!(plain.setup_shell.is_none());
     assert!(plain.setup_after.is_empty());
+}
+
+#[test]
+fn validate_setup_catches_unknown_setup_after() {
+    let toml_str = r#"
+[dotm]
+target = "~"
+
+[packages.a]
+setup = "echo a"
+setup_after = ["missing"]
+"#;
+    let root: RootConfig = toml::from_str(toml_str).unwrap();
+    let errors = validate_setup(&root);
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].contains("setup_after"));
+    assert!(errors[0].contains("missing"));
+}
+
+#[test]
+fn validate_setup_catches_empty_setup_field() {
+    let toml_str = r#"
+[dotm]
+target = "~"
+
+[packages.a]
+setup = "   "
+"#;
+    let root: RootConfig = toml::from_str(toml_str).unwrap();
+    let errors = validate_setup(&root);
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].contains("empty"));
+}
+
+#[test]
+fn validate_setup_catches_nonexistent_setup_shell_path() {
+    let toml_str = r#"
+[dotm]
+target = "~"
+
+[packages.a]
+setup = "echo a"
+setup_shell = "/nonexistent/shell"
+"#;
+    let root: RootConfig = toml::from_str(toml_str).unwrap();
+    let errors = validate_setup(&root);
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].contains("not executable") || errors[0].contains("does not exist"));
+}
+
+#[test]
+fn validate_setup_allows_bare_shell_name() {
+    let toml_str = r#"
+[dotm]
+target = "~"
+
+[packages.a]
+setup = "echo a"
+setup_shell = "zsh"
+"#;
+    let root: RootConfig = toml::from_str(toml_str).unwrap();
+    let errors = validate_setup(&root);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn validate_setup_passes_for_valid_config() {
+    let toml_str = r#"
+[dotm]
+target = "~"
+
+[packages.a]
+setup = "echo a"
+
+[packages.b]
+setup = "echo b"
+setup_after = ["a"]
+"#;
+    let root: RootConfig = toml::from_str(toml_str).unwrap();
+    let errors = validate_setup(&root);
+    assert!(errors.is_empty());
 }

@@ -229,3 +229,28 @@ fn cli_list_hosts_tree() {
         .stdout(predicate::str::contains("testhost"))
         .stdout(predicate::str::contains("shell"));
 }
+
+#[test]
+fn cli_check_rejects_bad_setup_after() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join("dotm.toml"),
+        r#"
+[dotm]
+target = "~"
+
+[packages.a]
+setup = "echo a"
+setup_after = ["missing"]
+"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("packages/a")).unwrap();
+
+    Command::cargo_bin("dotm")
+        .unwrap()
+        .args(["-d", dir.path().to_str().unwrap(), "check"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("setup_after"));
+}

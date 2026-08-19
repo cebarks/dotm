@@ -847,6 +847,21 @@ fn main() -> anyhow::Result<()> {
             // Validate system package configuration
             errors.extend(dotm::config::validate_system_packages(root));
 
+            // Validate setup configuration
+            errors.extend(dotm::config::validate_setup(root));
+
+            // Validate setup dependency ordering (catches cycles across
+            // depends + setup_after)
+            let setup_pkg_names: Vec<String> = root
+                .packages
+                .iter()
+                .filter(|(_, cfg)| cfg.setup.is_some())
+                .map(|(name, _)| name.clone())
+                .collect();
+            if let Err(e) = dotm::setup::resolve_setup_order(root, &setup_pkg_names) {
+                errors.push(format!("setup dependency resolution error: {e}"));
+            }
+
             // Emit deprecation warnings for strategy field
             let dep_warnings = dotm::config::deprecated_strategy_warnings(loader.root());
             for w in &dep_warnings {
