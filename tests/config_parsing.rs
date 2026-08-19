@@ -291,3 +291,41 @@ group = "root"
     let errors = validate_system_packages(&config);
     assert!(errors.is_empty(), "expected no errors, got: {:?}", errors);
 }
+
+#[test]
+fn setup_fields_parse() {
+    let toml_str = r#"
+[dotm]
+target = "~"
+
+[packages.homebrew]
+description = "Homebrew"
+setup = "brew bundle --file=~/.Brewfile --no-lock"
+setup_shell = "zsh"
+
+[packages.dev-tools]
+description = "Dev tools"
+setup = "pip install -r requirements.txt"
+setup_after = ["homebrew"]
+
+[packages.plain]
+description = "No setup"
+"#;
+    let config: RootConfig = toml::from_str(toml_str).unwrap();
+
+    let homebrew = &config.packages["homebrew"];
+    assert_eq!(
+        homebrew.setup.as_deref(),
+        Some("brew bundle --file=~/.Brewfile --no-lock")
+    );
+    assert_eq!(homebrew.setup_shell.as_deref(), Some("zsh"));
+    assert!(homebrew.setup_after.is_empty());
+
+    let dev_tools = &config.packages["dev-tools"];
+    assert_eq!(dev_tools.setup_after, vec!["homebrew"]);
+
+    let plain = &config.packages["plain"];
+    assert!(plain.setup.is_none());
+    assert!(plain.setup_shell.is_none());
+    assert!(plain.setup_after.is_empty());
+}

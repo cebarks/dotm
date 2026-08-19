@@ -58,6 +58,10 @@ pub struct PackageConfig {
     pub post_deploy: Option<String>,
     pub pre_undeploy: Option<String>,
     pub post_undeploy: Option<String>,
+    pub setup: Option<String>,
+    pub setup_shell: Option<String>,
+    #[serde(default)]
+    pub setup_after: Vec<String>,
 }
 
 pub fn validate_system_packages(root: &RootConfig) -> Vec<String> {
