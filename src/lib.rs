@@ -11,6 +11,7 @@ pub mod metadata;
 pub mod orchestrator;
 pub mod resolver;
 pub mod scanner;
+pub mod setup_state;
 pub mod state;
 pub mod status;
 pub mod template;
