@@ -1,6 +1,8 @@
+use crate::config::RootConfig;
 use crate::hash;
 use crate::setup_state::{SetupState, SetupStatus};
-use anyhow::Result;
+use anyhow::{Result, bail};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// Compute the content hash for a package's setup command, used for
@@ -15,6 +17,84 @@ pub fn compute_setup_hash(pkg_dir: &Path, setup_cmd: &str) -> Result<String> {
         }
     }
     Ok(hash::hash_content(setup_cmd.as_bytes()))
+}
+
+/// Combine package `depends` and `setup_after` into a single ordering
+/// constraint graph over `packages` (the set of packages that have a
+/// `setup` field), then topologically sort.
+///
+/// `setup_after` entries are validated against `root.packages` (the
+/// package must exist at all); a reference to a package that exists but
+/// isn't in `packages` (i.e. has no `setup` field) is a no-op constraint.
+pub fn resolve_setup_order(root: &RootConfig, packages: &[String]) -> Result<Vec<String>> {
+    let pkg_set: HashSet<&str> = packages.iter().map(|s| s.as_str()).collect();
+    let mut graph: HashMap<String, Vec<String>> = HashMap::new();
+
+    for pkg_name in packages {
+        let mut deps: Vec<String> = Vec::new();
+        if let Some(pkg_config) = root.packages.get(pkg_name) {
+            for dep in &pkg_config.depends {
+                if pkg_set.contains(dep.as_str()) && !deps.contains(dep) {
+                    deps.push(dep.clone());
+                }
+            }
+            for after in &pkg_config.setup_after {
+                if !root.packages.contains_key(after) {
+                    bail!("package '{pkg_name}' setup_after unknown package '{after}'");
+                }
+                if pkg_set.contains(after.as_str()) && !deps.contains(after) {
+                    deps.push(after.clone());
+                }
+            }
+        }
+        graph.insert(pkg_name.clone(), deps);
+    }
+
+    topological_sort(&graph, packages)
+}
+
+fn topological_sort(
+    graph: &HashMap<String, Vec<String>>,
+    packages: &[String],
+) -> Result<Vec<String>> {
+    let mut result = Vec::new();
+    let mut visited = HashSet::new();
+
+    for pkg in packages {
+        if !visited.contains(pkg) {
+            topo_visit(pkg, graph, &mut visited, &mut Vec::new(), &mut result)?;
+        }
+    }
+
+    Ok(result)
+}
+
+fn topo_visit(
+    pkg: &str,
+    graph: &HashMap<String, Vec<String>>,
+    visited: &mut HashSet<String>,
+    stack: &mut Vec<String>,
+    result: &mut Vec<String>,
+) -> Result<()> {
+    if stack.contains(&pkg.to_string()) {
+        stack.push(pkg.to_string());
+        bail!("circular setup dependency detected: {}", stack.join(" -> "));
+    }
+    if visited.contains(pkg) {
+        return Ok(());
+    }
+
+    stack.push(pkg.to_string());
+    if let Some(deps) = graph.get(pkg) {
+        for dep in deps {
+            topo_visit(dep, graph, visited, stack, result)?;
+        }
+    }
+    stack.pop();
+
+    visited.insert(pkg.to_string());
+    result.push(pkg.to_string());
+    Ok(())
 }
 
 /// Decide whether a package's setup should run, given its current script
@@ -46,8 +126,33 @@ pub fn should_run_setup(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{DotmSettings, PackageConfig, RootConfig};
     use crate::setup_state::{SetupEntry, SetupState, SetupStatus};
+    use std::collections::HashMap;
     use tempfile::TempDir;
+
+    fn make_root(packages: Vec<(&str, Vec<&str>, Vec<&str>, Option<&str>)>) -> RootConfig {
+        let mut pkg_map = HashMap::new();
+        for (name, depends, setup_after, setup) in packages {
+            pkg_map.insert(
+                name.to_string(),
+                PackageConfig {
+                    depends: depends.into_iter().map(String::from).collect(),
+                    setup_after: setup_after.into_iter().map(String::from).collect(),
+                    setup: setup.map(String::from),
+                    ..Default::default()
+                },
+            );
+        }
+        RootConfig {
+            dotm: DotmSettings {
+                target: "~".to_string(),
+                packages_dir: "packages".to_string(),
+                auto_prune: false,
+            },
+            packages: pkg_map,
+        }
+    }
 
     fn make_success_entry(hash: &str) -> SetupEntry {
         SetupEntry {
@@ -155,6 +260,64 @@ mod tests {
         let (run, reason) = should_run_setup("pkg", &hash, &state, false);
         assert!(run);
         assert_eq!(reason, "previous run failed");
+    }
+
+    #[test]
+    fn setup_after_orders_before_dependent() {
+        let root = make_root(vec![
+            ("a", vec![], vec!["b"], Some("echo a")),
+            ("b", vec![], vec![], Some("echo b")),
+        ]);
+        let order = resolve_setup_order(&root, &["a".to_string(), "b".to_string()]).unwrap();
+        let a_pos = order.iter().position(|p| p == "a").unwrap();
+        let b_pos = order.iter().position(|p| p == "b").unwrap();
+        assert!(b_pos < a_pos);
+    }
+
+    #[test]
+    fn package_depends_also_orders_setup() {
+        let root = make_root(vec![
+            ("a", vec!["b"], vec![], Some("echo a")),
+            ("b", vec![], vec![], Some("echo b")),
+        ]);
+        let order = resolve_setup_order(&root, &["a".to_string(), "b".to_string()]).unwrap();
+        let a_pos = order.iter().position(|p| p == "a").unwrap();
+        let b_pos = order.iter().position(|p| p == "b").unwrap();
+        assert!(b_pos < a_pos);
+    }
+
+    #[test]
+    fn circular_setup_after_errors() {
+        let root = make_root(vec![
+            ("a", vec![], vec!["b"], Some("echo a")),
+            ("b", vec![], vec!["a"], Some("echo b")),
+        ]);
+        let result = resolve_setup_order(&root, &["a".to_string(), "b".to_string()]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("circular"));
+    }
+
+    #[test]
+    fn unknown_setup_after_errors() {
+        let root = make_root(vec![("a", vec![], vec!["missing"], Some("echo a"))]);
+        let result = resolve_setup_order(&root, &["a".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unknown package 'missing'")
+        );
+    }
+
+    #[test]
+    fn setup_after_referencing_package_without_setup_field_is_a_noop() {
+        let root = make_root(vec![
+            ("a", vec![], vec!["b"], Some("echo a")),
+            ("b", vec![], vec![], None),
+        ]);
+        let order = resolve_setup_order(&root, &["a".to_string()]).unwrap();
+        assert_eq!(order, vec!["a".to_string()]);
     }
 
     #[test]
