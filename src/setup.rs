@@ -1,12 +1,170 @@
 use crate::config::{PackageConfig, RootConfig};
 use crate::hash;
+use crate::loader::ConfigLoader;
 use crate::orchestrator::expand_path;
+use crate::resolver;
 use crate::setup_state::{SetupEntry, SetupState, SetupStatus};
 use anyhow::{Context, Result, bail};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
+
+pub struct SetupOrchestrator {
+    loader: ConfigLoader,
+    state_dir: PathBuf,
+    system_mode: bool,
+    target_dir: PathBuf,
+}
+
+#[derive(Debug, Default)]
+pub struct SetupReport {
+    pub success: Vec<String>,
+    pub failed: Vec<(String, Option<String>)>,
+    pub skipped: Vec<(String, &'static str)>,
+    pub dry_run: Vec<(String, String, &'static str)>,
+}
+
+impl SetupOrchestrator {
+    pub fn new(loader: ConfigLoader, state_dir: PathBuf, system_mode: bool, target_dir: PathBuf) -> Self {
+        Self {
+            loader,
+            state_dir,
+            system_mode,
+            target_dir,
+        }
+    }
+
+    pub fn loader(&self) -> &ConfigLoader {
+        &self.loader
+    }
+
+    /// Resolve `hostname`'s roles into a fully `depends`-expanded package list.
+    fn resolve_host_packages(&self, hostname: &str) -> Result<Vec<String>> {
+        let host = self.loader.load_host(hostname)?;
+        let mut role_packages: Vec<String> = Vec::new();
+        let mut seen = HashSet::new();
+        for role_name in &host.roles {
+            let role = self.loader.load_role(role_name)?;
+            for pkg in role.packages {
+                if seen.insert(pkg.clone()) {
+                    role_packages.push(pkg);
+                }
+            }
+        }
+        let refs: Vec<&str> = role_packages.iter().map(|s| s.as_str()).collect();
+        resolver::resolve_packages(self.loader.root(), &refs)
+    }
+
+    pub fn run(
+        &self,
+        hostname: &str,
+        package_filter: Option<Vec<String>>,
+        dry_run: bool,
+        force: bool,
+    ) -> Result<SetupReport> {
+        let mut state = SetupState::load(&self.state_dir)?;
+        let mut report = SetupReport::default();
+
+        let mut resolved = self.resolve_host_packages(hostname)?;
+
+        if let Some(filter) = &package_filter {
+            let filter_refs: Vec<&str> = filter.iter().map(|s| s.as_str()).collect();
+            let mut filtered = resolver::resolve_packages(self.loader.root(), &filter_refs)?;
+            expand_setup_after_closure(self.loader.root(), &mut filtered)?;
+            resolved.retain(|pkg| filtered.contains(pkg));
+        }
+
+        let setup_packages: Vec<String> = resolved
+            .into_iter()
+            .filter(|pkg| {
+                self.loader
+                    .root()
+                    .packages
+                    .get(pkg)
+                    .is_some_and(|c| c.setup.is_some() && c.system == self.system_mode)
+            })
+            .collect();
+
+        let order = resolve_setup_order(self.loader.root(), &setup_packages)?;
+        let packages_dir = self.loader.packages_dir();
+
+        for pkg_name in order {
+            let pkg_config = self
+                .loader
+                .root()
+                .packages
+                .get(&pkg_name)
+                .expect("package resolved from root config must exist in root config");
+            let setup_cmd = pkg_config
+                .setup
+                .as_ref()
+                .expect("filtered to only packages with a setup field");
+            let pkg_dir = packages_dir.join(&pkg_name);
+
+            let current_hash = compute_setup_hash(&pkg_dir, setup_cmd)?;
+            let (should_run, reason) = should_run_setup(&pkg_name, &current_hash, &state, force);
+
+            if !should_run {
+                report.skipped.push((pkg_name, reason));
+                continue;
+            }
+
+            if dry_run {
+                report.dry_run.push((pkg_name, setup_cmd.clone(), reason));
+                continue;
+            }
+
+            let entry = match execute_setup(&pkg_name, &pkg_dir, pkg_config, &self.target_dir) {
+                Ok(entry) => entry,
+                Err(e) => {
+                    state.save()?;
+                    return Err(e);
+                }
+            };
+            let succeeded = entry.status == SetupStatus::Success;
+            let error = entry.error.clone();
+            state.update(pkg_name.clone(), entry);
+
+            if succeeded {
+                report.success.push(pkg_name);
+            } else {
+                report.failed.push((pkg_name, error));
+                break;
+            }
+        }
+
+        if !dry_run {
+            state.save()?;
+        }
+
+        Ok(report)
+    }
+}
+
+/// Extend `packages` in place with the transitive closure of `setup_after`
+/// references reachable from the packages already in the list.
+fn expand_setup_after_closure(root: &RootConfig, packages: &mut Vec<String>) -> Result<()> {
+    let mut seen: HashSet<String> = packages.iter().cloned().collect();
+    let mut stack: Vec<String> = packages.clone();
+
+    while let Some(pkg_name) = stack.pop() {
+        let Some(pkg_config) = root.packages.get(&pkg_name) else {
+            continue;
+        };
+        for after in &pkg_config.setup_after {
+            if !root.packages.contains_key(after) {
+                bail!("package '{pkg_name}' setup_after unknown package '{after}'");
+            }
+            if seen.insert(after.clone()) {
+                packages.push(after.clone());
+                stack.push(after.clone());
+            }
+        }
+    }
+
+    Ok(())
+}
 
 /// Compute the content hash for a package's setup command, used for
 /// change detection. If `setup` looks like a script path (no whitespace,
@@ -211,6 +369,7 @@ pub fn should_run_setup(
 mod tests {
     use super::*;
     use crate::config::{DotmSettings, RootConfig};
+    use crate::loader::ConfigLoader;
     use crate::setup_state::{SetupState, SetupStatus};
     use std::collections::HashMap;
     use tempfile::TempDir;
@@ -494,5 +653,217 @@ mod tests {
         let (run, reason) = should_run_setup("pkg", &hash, &state, true);
         assert!(run);
         assert_eq!(reason, "forced re-run");
+    }
+
+    // --- Orchestrator test helpers ---
+
+    fn write_fixture(dir: &Path) {
+        std::fs::write(
+            dir.join("dotm.toml"),
+            r#"
+[dotm]
+target = "~"
+
+[packages.a]
+description = "a"
+setup = "echo setup-a"
+
+[packages.b]
+description = "b"
+setup = "exit 3"
+
+[packages.c]
+description = "c"
+setup = "echo setup-c"
+setup_after = ["a"]
+
+[packages.no-setup]
+description = "no setup field"
+"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("packages/a")).unwrap();
+        std::fs::create_dir_all(dir.join("packages/b")).unwrap();
+        std::fs::create_dir_all(dir.join("packages/c")).unwrap();
+        std::fs::create_dir_all(dir.join("packages/no-setup")).unwrap();
+        std::fs::create_dir_all(dir.join("hosts")).unwrap();
+        std::fs::create_dir_all(dir.join("roles")).unwrap();
+        std::fs::write(
+            dir.join("hosts/test-host.toml"),
+            "hostname = \"test-host\"\nroles = [\"all\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("roles/all.toml"),
+            "packages = [\"a\", \"b\", \"c\", \"no-setup\"]\n",
+        )
+        .unwrap();
+    }
+
+    fn write_system_fixture(dir: &Path) {
+        std::fs::write(
+            dir.join("dotm.toml"),
+            r#"
+[dotm]
+target = "~"
+
+[packages.user-pkg]
+description = "user-space package"
+setup = "echo user-setup"
+
+[packages.sys-pkg]
+description = "system package"
+setup = "echo sys-setup"
+system = true
+target = "/tmp/dotm-system-fixture-target"
+"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("packages/user-pkg")).unwrap();
+        std::fs::create_dir_all(dir.join("packages/sys-pkg")).unwrap();
+        std::fs::create_dir_all(dir.join("hosts")).unwrap();
+        std::fs::create_dir_all(dir.join("roles")).unwrap();
+        std::fs::write(
+            dir.join("hosts/test-host.toml"),
+            "hostname = \"test-host\"\nroles = [\"all\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("roles/all.toml"),
+            "packages = [\"user-pkg\", \"sys-pkg\"]\n",
+        )
+        .unwrap();
+    }
+
+    fn test_orch(loader: ConfigLoader, state_dir: &Path) -> SetupOrchestrator {
+        SetupOrchestrator::new(
+            loader,
+            state_dir.to_path_buf(),
+            false,
+            PathBuf::from("/tmp/dotm-setup-test-target"),
+        )
+    }
+
+    #[test]
+    fn orchestrator_runs_all_setup_packages_in_order() {
+        let dotfiles = TempDir::new().unwrap();
+        write_fixture(dotfiles.path());
+        let state_dir = TempDir::new().unwrap();
+
+        let loader = ConfigLoader::new(dotfiles.path()).unwrap();
+        let orch = test_orch(loader, state_dir.path());
+        let report = orch.run("test-host", None, false, false).unwrap();
+
+        assert!(report.success.contains(&"a".to_string()));
+        assert!(report.failed.iter().any(|(p, _)| p == "b"));
+    }
+
+    #[test]
+    fn orchestrator_dry_run_does_not_execute_or_save_state() {
+        let dotfiles = TempDir::new().unwrap();
+        write_fixture(dotfiles.path());
+        let state_dir = TempDir::new().unwrap();
+
+        let loader = ConfigLoader::new(dotfiles.path()).unwrap();
+        let orch = test_orch(loader, state_dir.path());
+        let report = orch
+            .run("test-host", Some(vec!["a".to_string()]), true, false)
+            .unwrap();
+
+        assert_eq!(report.dry_run.len(), 1);
+        assert!(report.success.is_empty());
+        assert!(!state_dir.path().join("setup-state.json").exists());
+    }
+
+    #[test]
+    fn orchestrator_package_filter_resolves_setup_after_dependencies_too() {
+        let dotfiles = TempDir::new().unwrap();
+        write_fixture(dotfiles.path());
+        let state_dir = TempDir::new().unwrap();
+
+        let loader = ConfigLoader::new(dotfiles.path()).unwrap();
+        let orch = test_orch(loader, state_dir.path());
+        let report = orch
+            .run("test-host", Some(vec!["c".to_string()]), false, false)
+            .unwrap();
+
+        assert_eq!(report.success, vec!["a".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn orchestrator_second_run_skips_unchanged_success() {
+        let dotfiles = TempDir::new().unwrap();
+        write_fixture(dotfiles.path());
+        let state_dir = TempDir::new().unwrap();
+
+        let loader = ConfigLoader::new(dotfiles.path()).unwrap();
+        let orch = test_orch(loader, state_dir.path());
+        orch.run("test-host", Some(vec!["a".to_string()]), false, false)
+            .unwrap();
+
+        let loader2 = ConfigLoader::new(dotfiles.path()).unwrap();
+        let orch2 = test_orch(loader2, state_dir.path());
+        let report2 = orch2
+            .run("test-host", Some(vec!["a".to_string()]), false, false)
+            .unwrap();
+
+        assert_eq!(report2.success.len(), 0);
+        assert_eq!(report2.skipped.len(), 1);
+    }
+
+    #[test]
+    fn orchestrator_force_reruns_successful_package() {
+        let dotfiles = TempDir::new().unwrap();
+        write_fixture(dotfiles.path());
+        let state_dir = TempDir::new().unwrap();
+
+        let loader = ConfigLoader::new(dotfiles.path()).unwrap();
+        let orch = test_orch(loader, state_dir.path());
+        orch.run("test-host", Some(vec!["a".to_string()]), false, false)
+            .unwrap();
+
+        let loader2 = ConfigLoader::new(dotfiles.path()).unwrap();
+        let orch2 = test_orch(loader2, state_dir.path());
+        let report2 = orch2
+            .run("test-host", Some(vec!["a".to_string()]), false, true)
+            .unwrap();
+
+        assert_eq!(report2.success, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn orchestrator_ignores_packages_without_setup_field() {
+        let dotfiles = TempDir::new().unwrap();
+        write_fixture(dotfiles.path());
+        let state_dir = TempDir::new().unwrap();
+
+        let loader = ConfigLoader::new(dotfiles.path()).unwrap();
+        let orch = test_orch(loader, state_dir.path());
+        let report = orch.run("test-host", None, true, false).unwrap();
+
+        let all_dry_run_names: Vec<&String> = report.dry_run.iter().map(|(p, _, _)| p).collect();
+        assert!(!all_dry_run_names.contains(&&"no-setup".to_string()));
+    }
+
+    #[test]
+    fn orchestrator_system_mode_filters_by_system_flag() {
+        let dotfiles = TempDir::new().unwrap();
+        write_system_fixture(dotfiles.path());
+        let state_dir = TempDir::new().unwrap();
+
+        let loader = ConfigLoader::new(dotfiles.path()).unwrap();
+        let orch = test_orch(loader, state_dir.path());
+        let report = orch.run("test-host", None, false, false).unwrap();
+        assert_eq!(report.success, vec!["user-pkg".to_string()]);
+
+        let loader2 = ConfigLoader::new(dotfiles.path()).unwrap();
+        let orch2 = SetupOrchestrator::new(
+            loader2,
+            state_dir.path().to_path_buf(),
+            true,
+            PathBuf::from("/tmp/dotm-setup-test-target"),
+        );
+        let report2 = orch2.run("test-host", None, false, false).unwrap();
+        assert_eq!(report2.success, vec!["sys-pkg".to_string()]);
     }
 }
