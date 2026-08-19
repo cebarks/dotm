@@ -17,12 +17,17 @@ pub struct SetupOrchestrator {
     target_dir: PathBuf,
 }
 
+#[derive(Debug)]
+pub struct SetupResultEntry {
+    pub package: String,
+    pub output: Option<String>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Default)]
 pub struct SetupReport {
-    pub success: Vec<String>,
-    pub success_output: Vec<(String, Option<String>)>,
-    pub failed: Vec<(String, Option<String>)>,
-    pub failed_output: Vec<(String, Option<String>)>,
+    pub succeeded: Vec<SetupResultEntry>,
+    pub failed: Vec<SetupResultEntry>,
     pub skipped: Vec<(String, &'static str)>,
     pub dry_run: Vec<(String, String, &'static str)>,
 }
@@ -124,17 +129,18 @@ impl SetupOrchestrator {
                     return Err(e);
                 }
             };
-            let succeeded = entry.status == SetupStatus::Success;
-            let error = entry.error.clone();
-            let output = entry.output.clone();
-            state.update(pkg_name.clone(), entry);
+            let did_succeed = entry.status == SetupStatus::Success;
+            let result_entry = SetupResultEntry {
+                package: pkg_name.clone(),
+                output: entry.output.clone(),
+                error: entry.error.clone(),
+            };
+            state.update(pkg_name, entry);
 
-            if succeeded {
-                report.success_output.push((pkg_name.clone(), output));
-                report.success.push(pkg_name);
+            if did_succeed {
+                report.succeeded.push(result_entry);
             } else {
-                report.failed_output.push((pkg_name.clone(), output));
-                report.failed.push((pkg_name, error));
+                report.failed.push(result_entry);
                 break;
             }
         }
@@ -164,13 +170,22 @@ pub enum SetupListStatus {
 }
 
 impl SetupOrchestrator {
-    pub fn list(&self, hostname: &str) -> Result<Vec<SetupListEntry>> {
+    pub fn list(
+        &self,
+        hostname: &str,
+        package_filter: Option<&[String]>,
+    ) -> Result<Vec<SetupListEntry>> {
         let state = SetupState::load(&self.state_dir)?;
         let resolved = self.resolve_host_packages(hostname)?;
         let packages_dir = self.loader.packages_dir();
 
         let mut entries = Vec::new();
         for pkg_name in resolved {
+            if let Some(filter) = package_filter {
+                if !filter.contains(&pkg_name) {
+                    continue;
+                }
+            }
             let Some(pkg_config) = self.loader.root().packages.get(&pkg_name) else {
                 continue;
             };
@@ -799,6 +814,11 @@ target = "/tmp/dotm-system-fixture-target"
         .unwrap();
     }
 
+    /// Extract package names from a slice of SetupResultEntry for assertions.
+    fn pkg_names(entries: &[SetupResultEntry]) -> Vec<String> {
+        entries.iter().map(|e| e.package.clone()).collect()
+    }
+
     fn test_orch(loader: ConfigLoader, state_dir: &Path) -> SetupOrchestrator {
         SetupOrchestrator::new(
             loader,
@@ -818,8 +838,11 @@ target = "/tmp/dotm-system-fixture-target"
         let orch = test_orch(loader, state_dir.path());
         let report = orch.run("test-host", None, false, false).unwrap();
 
-        assert!(report.success.contains(&"a".to_string()));
-        assert!(report.failed.iter().any(|(p, _)| p == "b"));
+        assert!(pkg_names(&report.succeeded).contains(&"a".to_string()));
+        assert!(report.failed.iter().any(|e| e.package == "b"));
+        // Verify stop-on-failure: "c" comes after "b" in resolved order
+        // and must NOT have run.
+        assert!(!pkg_names(&report.succeeded).contains(&"c".to_string()));
     }
 
     #[test]
@@ -835,7 +858,7 @@ target = "/tmp/dotm-system-fixture-target"
             .unwrap();
 
         assert_eq!(report.dry_run.len(), 1);
-        assert!(report.success.is_empty());
+        assert!(report.succeeded.is_empty());
         assert!(!state_dir.path().join("setup-state.json").exists());
     }
 
@@ -851,7 +874,7 @@ target = "/tmp/dotm-system-fixture-target"
             .run("test-host", Some(vec!["c".to_string()]), false, false)
             .unwrap();
 
-        assert_eq!(report.success, vec!["a".to_string(), "c".to_string()]);
+        assert_eq!(pkg_names(&report.succeeded), vec!["a".to_string(), "c".to_string()]);
     }
 
     #[test]
@@ -871,7 +894,7 @@ target = "/tmp/dotm-system-fixture-target"
             .run("test-host", Some(vec!["a".to_string()]), false, false)
             .unwrap();
 
-        assert_eq!(report2.success.len(), 0);
+        assert_eq!(report2.succeeded.len(), 0);
         assert_eq!(report2.skipped.len(), 1);
     }
 
@@ -892,7 +915,7 @@ target = "/tmp/dotm-system-fixture-target"
             .run("test-host", Some(vec!["a".to_string()]), false, true)
             .unwrap();
 
-        assert_eq!(report2.success, vec!["a".to_string()]);
+        assert_eq!(pkg_names(&report2.succeeded), vec!["a".to_string()]);
     }
 
     #[test]
@@ -918,7 +941,7 @@ target = "/tmp/dotm-system-fixture-target"
         let loader = ConfigLoader::new(dotfiles.path()).unwrap();
         let orch = test_orch(loader, state_dir.path());
         let report = orch.run("test-host", None, false, false).unwrap();
-        assert_eq!(report.success, vec!["user-pkg".to_string()]);
+        assert_eq!(pkg_names(&report.succeeded), vec!["user-pkg".to_string()]);
 
         let loader2 = ConfigLoader::new(dotfiles.path()).unwrap();
         let orch2 = SetupOrchestrator::new(
@@ -928,7 +951,7 @@ target = "/tmp/dotm-system-fixture-target"
             PathBuf::from("/tmp/dotm-setup-test-target"),
         );
         let report2 = orch2.run("test-host", None, false, false).unwrap();
-        assert_eq!(report2.success, vec!["sys-pkg".to_string()]);
+        assert_eq!(pkg_names(&report2.succeeded), vec!["sys-pkg".to_string()]);
     }
 
     // --- List tests ---
@@ -941,7 +964,7 @@ target = "/tmp/dotm-system-fixture-target"
 
         let loader = ConfigLoader::new(dotfiles.path()).unwrap();
         let orch = test_orch(loader, state_dir.path());
-        let entries = orch.list("test-host").unwrap();
+        let entries = orch.list("test-host", None).unwrap();
 
         let names: Vec<&String> = entries.iter().map(|e| &e.package).collect();
         assert!(names.contains(&&"a".to_string()));
@@ -964,7 +987,7 @@ target = "/tmp/dotm-system-fixture-target"
 
         let loader2 = ConfigLoader::new(dotfiles.path()).unwrap();
         let orch2 = test_orch(loader2, state_dir.path());
-        let entries = orch2.list("test-host").unwrap();
+        let entries = orch2.list("test-host", None).unwrap();
         let a_entry = entries.iter().find(|e| e.package == "a").unwrap();
         assert!(matches!(a_entry.status, SetupListStatus::Success(_)));
     }
@@ -987,7 +1010,7 @@ target = "/tmp/dotm-system-fixture-target"
 
         let loader2 = ConfigLoader::new(dotfiles.path()).unwrap();
         let orch2 = test_orch(loader2, state_dir.path());
-        let entries = orch2.list("test-host").unwrap();
+        let entries = orch2.list("test-host", None).unwrap();
         let a_entry = entries.iter().find(|e| e.package == "a").unwrap();
         assert!(matches!(a_entry.status, SetupListStatus::Changed));
     }
@@ -1005,7 +1028,7 @@ target = "/tmp/dotm-system-fixture-target"
 
         let loader2 = ConfigLoader::new(dotfiles.path()).unwrap();
         let orch2 = test_orch(loader2, state_dir.path());
-        let entries = orch2.list("test-host").unwrap();
+        let entries = orch2.list("test-host", None).unwrap();
         let b_entry = entries.iter().find(|e| e.package == "b").unwrap();
         assert!(matches!(b_entry.status, SetupListStatus::Failed(_)));
         assert!(b_entry.error.is_some());
@@ -1014,18 +1037,45 @@ target = "/tmp/dotm-system-fixture-target"
     #[test]
     fn report_carries_captured_output_for_failures() {
         let dotfiles = TempDir::new().unwrap();
-        write_fixture(dotfiles.path());
+        // Use a command that produces stderr output before failing,
+        // so we can assert the output field is actually populated.
+        std::fs::write(
+            dotfiles.path().join("dotm.toml"),
+            r#"
+[dotm]
+target = "~"
+
+[packages.noisy-fail]
+description = "fails with output"
+setup = "echo diagnostics-here >&2; exit 1"
+"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(dotfiles.path().join("packages/noisy-fail")).unwrap();
+        std::fs::create_dir_all(dotfiles.path().join("hosts")).unwrap();
+        std::fs::create_dir_all(dotfiles.path().join("roles")).unwrap();
+        std::fs::write(
+            dotfiles.path().join("hosts/test-host.toml"),
+            "hostname = \"test-host\"\nroles = [\"all\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dotfiles.path().join("roles/all.toml"),
+            "packages = [\"noisy-fail\"]\n",
+        )
+        .unwrap();
         let state_dir = TempDir::new().unwrap();
 
         let loader = ConfigLoader::new(dotfiles.path()).unwrap();
         let orch = test_orch(loader, state_dir.path());
-        let report = orch
-            .run("test-host", Some(vec!["b".to_string()]), false, false)
-            .unwrap();
+        let report = orch.run("test-host", None, false, false).unwrap();
 
         assert_eq!(report.failed.len(), 1);
-        let (_, output_opt) = &report.failed_output[0];
-        let _ = output_opt;
+        assert!(report.failed[0]
+            .output
+            .as_deref()
+            .unwrap()
+            .contains("diagnostics-here"));
     }
 
     #[test]
@@ -1040,9 +1090,12 @@ target = "/tmp/dotm-system-fixture-target"
             .run("test-host", Some(vec!["a".to_string()]), false, false)
             .unwrap();
 
-        assert_eq!(report.success.len(), 1);
-        let (_, output) = &report.success_output[0];
-        assert!(output.as_deref().unwrap().contains("setup-a"));
+        assert_eq!(report.succeeded.len(), 1);
+        assert!(report.succeeded[0]
+            .output
+            .as_deref()
+            .unwrap()
+            .contains("setup-a"));
     }
 
     #[test]
@@ -1053,7 +1106,7 @@ target = "/tmp/dotm-system-fixture-target"
 
         let loader = ConfigLoader::new(dotfiles.path()).unwrap();
         let orch = test_orch(loader, state_dir.path());
-        let entries = orch.list("test-host").unwrap();
+        let entries = orch.list("test-host", None).unwrap();
         let names: Vec<&String> = entries.iter().map(|e| &e.package).collect();
         assert!(names.contains(&&"user-pkg".to_string()));
         assert!(!names.contains(&&"sys-pkg".to_string()));

@@ -424,7 +424,7 @@ fn main() -> anyhow::Result<()> {
             let package_filter = package.map(|p| vec![p]);
 
             if list {
-                let entries = orch.list(&hostname)?;
+                let entries = orch.list(&hostname, package_filter.as_deref())?;
                 if entries.is_empty() {
                     println!("No setup tasks configured.");
                     return Ok(());
@@ -473,30 +473,30 @@ fn main() -> anyhow::Result<()> {
                     println!();
                 }
             } else {
-                for pkg in &report.success {
-                    println!("\u{2713} Setup succeeded: {pkg}");
+                for entry in &report.succeeded {
+                    println!("\u{2713} Setup succeeded: {}", entry.package);
                 }
                 for (pkg, reason) in &report.skipped {
                     println!("\u{2296} Setup skipped: {pkg} ({reason})");
                 }
-                for (pkg, err) in &report.failed {
-                    eprintln!("\u{2717} Setup failed: {pkg}");
-                    if let Some(msg) = err {
+                for entry in &report.failed {
+                    eprintln!("\u{2717} Setup failed: {}", entry.package);
+                    if let Some(ref msg) = entry.error {
                         eprintln!("  Error: {msg}");
                     }
                 }
 
-                for (pkg, output) in &report.success_output {
+                for entry in &report.succeeded {
                     if verbose {
-                        if let Some(out) = output {
-                            println!("--- {pkg} output ---");
+                        if let Some(ref out) = entry.output {
+                            println!("--- {} output ---", entry.package);
                             println!("{out}");
                         }
                     }
                 }
-                for (pkg, output) in &report.failed_output {
-                    if let Some(out) = output {
-                        eprintln!("--- {pkg} output ---");
+                for entry in &report.failed {
+                    if let Some(ref out) = entry.output {
+                        eprintln!("--- {} output ---", entry.package);
                         eprintln!("{out}");
                     }
                 }

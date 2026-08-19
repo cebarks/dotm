@@ -168,15 +168,21 @@ fn setup_respects_setup_after_ordering() {
     let state_dir = TempDir::new().unwrap();
 
     // Running just "delta" (setup_after alpha) must run alpha first.
-    isolated_cmd(
+    let output = isolated_cmd(
         dotfiles.path(),
         state_dir.path(),
         &["setup", "--host", "test-host", "--package", "delta"],
     )
     .assert()
     .success()
-    .stdout(
-        predicate::str::contains("Setup succeeded: alpha")
-            .and(predicate::str::contains("Setup succeeded: delta")),
+    .get_output()
+    .stdout
+    .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    let alpha_pos = stdout.find("Setup succeeded: alpha").expect("alpha should succeed");
+    let delta_pos = stdout.find("Setup succeeded: delta").expect("delta should succeed");
+    assert!(
+        alpha_pos < delta_pos,
+        "alpha must run before delta, but alpha appeared at {alpha_pos} and delta at {delta_pos}"
     );
 }
