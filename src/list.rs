@@ -27,6 +27,9 @@ pub fn render_packages(root: &RootConfig, verbose: bool) -> String {
             if pkg.system {
                 out.push_str("  system: true\n");
             }
+            if let Some(ref setup) = pkg.setup {
+                out.push_str(&format!("  Setup: {setup}\n"));
+            }
         } else {
             out.push_str(name);
             if let Some(ref desc) = root.packages[name].description {
