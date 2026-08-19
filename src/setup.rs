@@ -1,4 +1,5 @@
 use crate::hash;
+use crate::setup_state::{SetupState, SetupStatus};
 use anyhow::Result;
 use std::path::Path;
 
@@ -16,10 +17,49 @@ pub fn compute_setup_hash(pkg_dir: &Path, setup_cmd: &str) -> Result<String> {
     Ok(hash::hash_content(setup_cmd.as_bytes()))
 }
 
+/// Decide whether a package's setup should run, given its current script
+/// hash and prior state. Returns (should_run, human-readable reason).
+pub fn should_run_setup(
+    package: &str,
+    current_hash: &str,
+    state: &SetupState,
+    force: bool,
+) -> (bool, &'static str) {
+    if force {
+        return (true, "forced re-run");
+    }
+
+    match state.get(package) {
+        None => (true, "never run"),
+        Some(entry) => {
+            if entry.script_hash != current_hash {
+                (true, "script changed")
+            } else if entry.status == SetupStatus::Failed {
+                (true, "previous run failed")
+            } else {
+                (false, "already run successfully")
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::setup_state::{SetupEntry, SetupState, SetupStatus};
     use tempfile::TempDir;
+
+    fn make_success_entry(hash: &str) -> SetupEntry {
+        SetupEntry {
+            last_run: "2026-03-31T12:00:00+00:00".to_string(),
+            script_hash: hash.to_string(),
+            status: SetupStatus::Success,
+            exit_code: 0,
+            duration_ms: 10,
+            error: None,
+            output: None,
+        }
+    }
 
     #[test]
     fn inline_command_hashes_the_string() {
@@ -67,5 +107,65 @@ mod tests {
         std::fs::write(dir.path().join("setup.sh"), "echo hi").unwrap();
         let h = compute_setup_hash(dir.path(), "setup.sh --flag").unwrap();
         assert_eq!(h, hash::hash_content(b"setup.sh --flag"));
+    }
+
+    #[test]
+    fn should_run_when_never_run() {
+        let dir = TempDir::new().unwrap();
+        let state = SetupState::new(dir.path());
+        let hash = compute_setup_hash(dir.path(), "echo hi").unwrap();
+        let (run, reason) = should_run_setup("pkg", &hash, &state, false);
+        assert!(run);
+        assert_eq!(reason, "never run");
+    }
+
+    #[test]
+    fn should_skip_when_already_success_and_hash_matches() {
+        let dir = TempDir::new().unwrap();
+        let hash = compute_setup_hash(dir.path(), "echo hi").unwrap();
+        let mut state = SetupState::new(dir.path());
+        state.update("pkg".to_string(), make_success_entry(&hash));
+
+        let (run, reason) = should_run_setup("pkg", &hash, &state, false);
+        assert!(!run);
+        assert_eq!(reason, "already run successfully");
+    }
+
+    #[test]
+    fn should_run_when_script_changed() {
+        let dir = TempDir::new().unwrap();
+        let mut state = SetupState::new(dir.path());
+        state.update("pkg".to_string(), make_success_entry("old-hash"));
+
+        let new_hash = compute_setup_hash(dir.path(), "echo hi").unwrap();
+        let (run, reason) = should_run_setup("pkg", &new_hash, &state, false);
+        assert!(run);
+        assert_eq!(reason, "script changed");
+    }
+
+    #[test]
+    fn should_run_when_previous_failed() {
+        let dir = TempDir::new().unwrap();
+        let hash = compute_setup_hash(dir.path(), "echo hi").unwrap();
+        let mut entry = make_success_entry(&hash);
+        entry.status = SetupStatus::Failed;
+        let mut state = SetupState::new(dir.path());
+        state.update("pkg".to_string(), entry);
+
+        let (run, reason) = should_run_setup("pkg", &hash, &state, false);
+        assert!(run);
+        assert_eq!(reason, "previous run failed");
+    }
+
+    #[test]
+    fn force_flag_overrides_skip() {
+        let dir = TempDir::new().unwrap();
+        let hash = compute_setup_hash(dir.path(), "echo hi").unwrap();
+        let mut state = SetupState::new(dir.path());
+        state.update("pkg".to_string(), make_success_entry(&hash));
+
+        let (run, reason) = should_run_setup("pkg", &hash, &state, true);
+        assert!(run);
+        assert_eq!(reason, "forced re-run");
     }
 }
