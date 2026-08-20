@@ -58,6 +58,10 @@ pub struct PackageConfig {
     pub post_deploy: Option<String>,
     pub pre_undeploy: Option<String>,
     pub post_undeploy: Option<String>,
+    pub setup: Option<String>,
+    pub setup_shell: Option<String>,
+    #[serde(default)]
+    pub setup_after: Vec<String>,
 }
 
 pub fn validate_system_packages(root: &RootConfig) -> Vec<String> {
@@ -124,6 +128,57 @@ pub fn deprecated_strategy_warnings(root: &RootConfig) -> Vec<String> {
         }
     }
     warnings
+}
+
+pub fn validate_setup(root: &RootConfig) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    for (name, pkg) in &root.packages {
+        for after in &pkg.setup_after {
+            if !root.packages.contains_key(after) {
+                errors.push(format!(
+                    "package '{name}' setup_after unknown package '{after}'"
+                ));
+            }
+        }
+
+        if let Some(ref setup) = pkg.setup {
+            if setup.trim().is_empty() {
+                errors.push(format!("package '{name}': setup field cannot be empty"));
+            }
+        }
+
+        if let Some(ref shell) = pkg.setup_shell {
+            let shell_bin = shell.split_whitespace().next().unwrap_or("");
+            if shell_bin.starts_with('/') {
+                let path = std::path::Path::new(shell_bin);
+                if !path.exists() {
+                    errors.push(format!(
+                        "package '{name}': setup_shell '{shell_bin}' does not exist"
+                    ));
+                } else if !is_executable(path) {
+                    errors.push(format!(
+                        "package '{name}': setup_shell '{shell_bin}' is not executable"
+                    ));
+                }
+            }
+        }
+    }
+
+    errors
+}
+
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .map(|m| m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(_path: &std::path::Path) -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]

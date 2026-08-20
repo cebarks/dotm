@@ -244,6 +244,42 @@ post_undeploy = ""
 - `pre_*` hook failure aborts the operation for that package; `post_*` failures are warnings
 - Hooks are skipped during `--dry-run`
 
+## Setup Tasks
+
+Packages can define one-time or occasional imperative initialization tasks via the `setup` field — package manager bundles, OS preference commands, or dependency installs that `deploy`'s file-based model can't express:
+
+```toml
+[packages.homebrew]
+description = "Homebrew package manager"
+setup = "brew bundle --file=~/.Brewfile --no-lock"
+
+[packages.macos-defaults]
+description = "macOS system preferences"
+setup = "scripts/apply-defaults.sh"
+setup_shell = "zsh"
+
+[packages.dev-tools]
+description = "Development dependencies"
+setup = "pip install -r requirements.txt"
+setup_after = ["homebrew"]  # run only after homebrew's setup completes
+```
+
+- `setup` — a shell command or a path (relative to the package directory) to a script
+- `setup_shell` — shell used to run the command, default `"sh"`. A full path with flags (e.g. `"/bin/zsh -l"`) is split on whitespace: the first token is the binary, the rest are flags passed before `-c`
+- `setup_after` — package names whose setup must complete first, in addition to ordering already implied by `depends`. `--package` filtering pulls in `setup_after` (and `depends`) dependencies transitively
+
+```bash
+dotm setup                    # run all setup tasks for current host
+dotm setup --package homebrew # run only homebrew's setup (and its setup_after/depends)
+dotm setup --dry-run          # show what would run, without running it
+dotm setup --force            # re-run even if already successful
+dotm setup --list             # show setup tasks and their status
+dotm setup --verbose          # print captured command output even on success
+dotm setup --system           # run setup only for packages with system = true
+```
+
+Setup execution is tracked in `setup-state.json` (alongside `dotm-state.json`) and only re-runs a package when it has never been run, its setup command/script content changed, the previous run failed, or `--force` is passed.
+
 ## Orphan Detection
 
 When files are removed from a package or a package is removed from a role, previously deployed files become "orphans." dotm detects these on deploy and warns about them:
@@ -349,6 +385,7 @@ Options:
 Commands:
   deploy        Deploy configs for the current host
   undeploy      Remove all managed symlinks and copies
+  setup         Run package setup tasks
   restore       Restore files to their pre-dotm state
   status        Show deployment status
   diff          Show diffs for files modified since last deploy

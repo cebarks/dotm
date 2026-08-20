@@ -113,7 +113,8 @@ dotm setup
 
 # Run setup for specific package(s)
 dotm setup --package homebrew
-dotm setup -p homebrew -p macos-defaults
+# --package accepts one package per invocation (matches deploy --package);
+# run the command again for additional packages.
 
 # Dry run (show what would execute)
 dotm setup --dry-run
@@ -135,7 +136,7 @@ sudo dotm setup --system
 
 | Flag | Short | Description |
 |------|-------|-------------|
-| `--package <NAME>` | `-p` | Run setup only for specified package(s). Can be repeated. If omitted, runs all packages. |
+| `--package <NAME>` | `-p` | Run setup only for the specified package (and its setup_after/depends dependencies). One package per invocation. If omitted, runs all packages. |
 | `--dry-run` | - | Show what would be executed without running commands |
 | `--force` | `-f` | Re-run setup even if already executed successfully |
 | `--list` | `-l` | List all packages with setup tasks and their status |

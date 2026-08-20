@@ -52,6 +52,30 @@ enum Commands {
         #[arg(long)]
         no_hooks: bool,
     },
+    /// Run package setup tasks (one-time/occasional imperative initialization)
+    Setup {
+        /// Target host (defaults to system hostname)
+        #[arg(long)]
+        host: Option<String>,
+        /// Show what would be executed without running
+        #[arg(long)]
+        dry_run: bool,
+        /// Re-run setup even if already executed successfully
+        #[arg(short, long)]
+        force: bool,
+        /// List available setup tasks and their status
+        #[arg(short, long)]
+        list: bool,
+        /// Run setup only for this package (and its setup_after/depends dependencies)
+        #[arg(short, long)]
+        package: Option<String>,
+        /// Operate on system packages (requires root)
+        #[arg(long)]
+        system: bool,
+        /// Print captured command output even on success
+        #[arg(short, long)]
+        verbose: bool,
+    },
     /// Show deployment status
     Status {
         /// Show all files, not just problems
@@ -367,6 +391,120 @@ fn main() -> anyhow::Result<()> {
                 state.undeploy(packages.as_ref(), &cli.dir)?
             };
             println!("Removed {removed} managed files.");
+        }
+        Commands::Setup {
+            host,
+            dry_run,
+            force,
+            list,
+            package,
+            system,
+            verbose,
+        } => {
+            let hostname = match host {
+                Some(h) => h,
+                None => hostname::get()
+                    .map(|h| h.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| {
+                        eprintln!("error: could not detect hostname, use --host to specify");
+                        std::process::exit(1);
+                    }),
+            };
+
+            let state_dir = if system {
+                check_system_privileges();
+                system_state_dir()
+            } else {
+                dotm_state_dir()
+            };
+
+            let loader = dotm::loader::ConfigLoader::new(&cli.dir)?;
+            let target_dir = resolve_target_dir(&loader.root().dotm.target)?;
+            let orch = dotm::setup::SetupOrchestrator::new(loader, state_dir, system, target_dir);
+            let package_filter = package.map(|p| vec![p]);
+
+            if list {
+                let entries = orch.list(&hostname, package_filter.as_deref())?;
+                if entries.is_empty() {
+                    println!("No setup tasks configured.");
+                    return Ok(());
+                }
+                println!("Available setup tasks:\n");
+                for entry in entries {
+                    println!("{}", entry.package);
+                    println!("  Command: {}", entry.command);
+                    match entry.status {
+                        dotm::setup::SetupListStatus::NotRun => {
+                            println!("  Status: \u{25cb} Not run");
+                        }
+                        dotm::setup::SetupListStatus::Success(ts) => {
+                            println!("  Status: \u{2713} Success (last run: {ts})");
+                        }
+                        dotm::setup::SetupListStatus::Failed(ts) => {
+                            println!("  Status: \u{2717} Failed (last run: {ts})");
+                            if let Some(err) = entry.error {
+                                println!("  Error: {err}");
+                            }
+                        }
+                        dotm::setup::SetupListStatus::Changed => {
+                            println!("  Status: \u{26a0} Changed (script modified since last run)");
+                        }
+                    }
+                    println!();
+                }
+                return Ok(());
+            }
+
+            let report = orch.run(&hostname, package_filter, dry_run, force)?;
+
+            if dry_run {
+                if report.dry_run.is_empty() && report.skipped.is_empty() {
+                    println!("No setup tasks to run.");
+                }
+                for (pkg, cmd, reason) in &report.dry_run {
+                    println!("Setup (dry run): {pkg}");
+                    println!("  Would execute: {cmd}");
+                    println!("  Reason: {reason}");
+                    println!();
+                }
+                for (pkg, reason) in &report.skipped {
+                    println!("Setup (dry run): {pkg}");
+                    println!("  Would skip: {reason}");
+                    println!();
+                }
+            } else {
+                for entry in &report.succeeded {
+                    println!("\u{2713} Setup succeeded: {}", entry.package);
+                }
+                for (pkg, reason) in &report.skipped {
+                    println!("\u{2296} Setup skipped: {pkg} ({reason})");
+                }
+                for entry in &report.failed {
+                    eprintln!("\u{2717} Setup failed: {}", entry.package);
+                    if let Some(ref msg) = entry.error {
+                        eprintln!("  Error: {msg}");
+                    }
+                }
+
+                for entry in &report.succeeded {
+                    if verbose {
+                        if let Some(ref out) = entry.output {
+                            println!("--- {} output ---", entry.package);
+                            println!("{out}");
+                        }
+                    }
+                }
+                for entry in &report.failed {
+                    if let Some(ref out) = entry.output {
+                        eprintln!("--- {} output ---", entry.package);
+                        eprintln!("{out}");
+                    }
+                }
+
+                if !report.failed.is_empty() {
+                    std::process::exit(1);
+                }
+            }
         }
         Commands::Status {
             verbose,
@@ -708,6 +846,21 @@ fn main() -> anyhow::Result<()> {
 
             // Validate system package configuration
             errors.extend(dotm::config::validate_system_packages(root));
+
+            // Validate setup configuration
+            errors.extend(dotm::config::validate_setup(root));
+
+            // Validate setup dependency ordering (catches cycles across
+            // depends + setup_after)
+            let setup_pkg_names: Vec<String> = root
+                .packages
+                .iter()
+                .filter(|(_, cfg)| cfg.setup.is_some())
+                .map(|(name, _)| name.clone())
+                .collect();
+            if let Err(e) = dotm::setup::resolve_setup_order(root, &setup_pkg_names) {
+                errors.push(format!("setup dependency resolution error: {e}"));
+            }
 
             // Emit deprecation warnings for strategy field
             let dep_warnings = dotm::config::deprecated_strategy_warnings(loader.root());
