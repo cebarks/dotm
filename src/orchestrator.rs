@@ -489,11 +489,26 @@ impl Orchestrator {
                     report.orphaned.push(old_entry.target.clone());
 
                     if !dry_run && self.loader.root().dotm.auto_prune {
-                        if old_entry.target.is_symlink() || old_entry.target.exists() {
-                            let _ = std::fs::remove_file(&old_entry.target);
+                        let removed = if old_entry.target.is_symlink() || old_entry.target.exists()
+                        {
+                            match std::fs::remove_file(&old_entry.target) {
+                                Ok(()) => true,
+                                Err(e) => {
+                                    eprintln!(
+                                        "warning: failed to prune orphaned file {}: {e}",
+                                        old_entry.target.display()
+                                    );
+                                    false
+                                }
+                            }
+                        } else {
+                            true
+                        };
+
+                        if removed {
                             crate::state::cleanup_empty_parents(&old_entry.target);
+                            report.pruned.push(old_entry.target.clone());
                         }
-                        report.pruned.push(old_entry.target.clone());
                     }
                 }
             }
@@ -502,12 +517,20 @@ impl Orchestrator {
         // Phase 5: Save state (including partial state on error, so deployed files are tracked)
         if !dry_run && self.state_dir.is_some() {
             // Merge: keep old entries for targets we didn't deploy this run,
-            // except entries that Phase 4.5 actually removed via auto-prune.
+            // except targets already removed or orphaned targets that are gone.
             let deployed_targets: HashSet<PathBuf> =
                 state.entries().iter().map(|e| e.target.clone()).collect();
             let pruned_targets: HashSet<&PathBuf> = report.pruned.iter().collect();
+            let missing_orphan_targets: HashSet<&PathBuf> = report
+                .orphaned
+                .iter()
+                .filter(|target| !target.exists() && !target.is_symlink())
+                .collect();
             for old in existing_state.entries() {
-                if !deployed_targets.contains(&old.target) && !pruned_targets.contains(&old.target) {
+                if !deployed_targets.contains(&old.target)
+                    && !pruned_targets.contains(&old.target)
+                    && !missing_orphan_targets.contains(&old.target)
+                {
                     state.record(old.clone());
                 }
             }

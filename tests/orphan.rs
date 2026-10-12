@@ -69,12 +69,20 @@ fn deploy_preserves_orphaned_entries_for_later_prune() {
     let report = orch.deploy("testhost", false, false).unwrap();
     let orphan = target.path().join(".config/nvim/init.lua");
     assert!(report.orphaned.contains(&orphan));
-    assert!(orphan.exists(), "deploy without auto_prune must leave the file");
+    assert!(
+        orphan.exists(),
+        "deploy without auto_prune must leave the file"
+    );
 
     let state = dotm::state::DeployState::load(state_dir.path()).unwrap();
     assert!(
         state.entries().iter().any(|entry| entry.target == orphan),
         "the orphan must remain tracked so dotm prune can find it"
+    );
+    assert_eq!(
+        state.entries().len(),
+        2,
+        "merging retained orphan entries must not duplicate existing state"
     );
 
     let mut prune_scan = Orchestrator::new(dotfiles.path(), target.path())
@@ -84,6 +92,79 @@ fn deploy_preserves_orphaned_entries_for_later_prune() {
     assert!(
         prune_report.orphaned.contains(&orphan),
         "a later dry-run scan must still identify the orphan"
+    );
+}
+
+#[test]
+fn deploy_drops_orphaned_entries_when_target_is_already_missing() {
+    let target = TempDir::new().unwrap();
+    let dotfiles = TempDir::new().unwrap();
+    let state_dir = TempDir::new().unwrap();
+
+    copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
+
+    let mut orch = Orchestrator::new(dotfiles.path(), target.path())
+        .unwrap()
+        .with_state_dir(state_dir.path());
+    orch.deploy("testhost", false, false).unwrap();
+
+    std::fs::write(dotfiles.path().join("roles/dev.toml"), "packages = []\n").unwrap();
+    let orphan = target.path().join(".config/nvim/init.lua");
+    std::fs::remove_file(&orphan).unwrap();
+
+    let mut orch = Orchestrator::new(dotfiles.path(), target.path())
+        .unwrap()
+        .with_state_dir(state_dir.path());
+    let report = orch.deploy("testhost", false, false).unwrap();
+    assert!(report.orphaned.contains(&orphan));
+
+    let state = dotm::state::DeployState::load(state_dir.path()).unwrap();
+    assert!(
+        state.entries().iter().all(|entry| entry.target != orphan),
+        "a missing orphan must not remain tracked and keep status failing"
+    );
+}
+
+#[test]
+fn auto_prune_retains_state_when_target_cannot_be_removed() {
+    let target = TempDir::new().unwrap();
+    let dotfiles = TempDir::new().unwrap();
+    let state_dir = TempDir::new().unwrap();
+    copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
+
+    let config = std::fs::read_to_string(dotfiles.path().join("dotm.toml")).unwrap();
+    let config = config.replace(
+        "[dotm]\ntarget = \"~\"",
+        "[dotm]\ntarget = \"~\"\nauto_prune = true",
+    );
+    std::fs::write(dotfiles.path().join("dotm.toml"), config).unwrap();
+
+    let mut orch = Orchestrator::new(dotfiles.path(), target.path())
+        .unwrap()
+        .with_state_dir(state_dir.path());
+    orch.deploy("testhost", false, false).unwrap();
+
+    let orphan = target.path().join(".config/nvim/init.lua");
+    std::fs::remove_file(&orphan).unwrap();
+    std::fs::create_dir(&orphan).unwrap();
+    std::fs::write(orphan.join("blocker"), "keep directory non-empty").unwrap();
+    std::fs::write(dotfiles.path().join("roles/dev.toml"), "packages = []\n").unwrap();
+
+    let mut orch = Orchestrator::new(dotfiles.path(), target.path())
+        .unwrap()
+        .with_state_dir(state_dir.path());
+    let report = orch.deploy("testhost", false, false).unwrap();
+
+    assert!(report.orphaned.contains(&orphan));
+    assert!(
+        report.pruned.is_empty(),
+        "a target that could not be removed must not be reported as pruned"
+    );
+    assert!(orphan.is_dir());
+    let state = dotm::state::DeployState::load(state_dir.path()).unwrap();
+    assert!(
+        state.entries().iter().any(|entry| entry.target == orphan),
+        "a target that could not be removed must remain tracked"
     );
 }
 

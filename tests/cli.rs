@@ -100,6 +100,93 @@ fn cli_deploy_dry_run() {
 }
 
 #[test]
+fn cli_prune_removes_orphan_after_deploy_warning() {
+    let dotfiles = TempDir::new().unwrap();
+    let home = TempDir::new().unwrap();
+    copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
+
+    Command::cargo_bin("dotm")
+        .unwrap()
+        .env("HOME", home.path())
+        .args([
+            "-d",
+            dotfiles.path().to_str().unwrap(),
+            "deploy",
+            "--host",
+            "testhost",
+        ])
+        .assert()
+        .success();
+
+    let orphan = home.path().join(".config/nvim/init.lua");
+    assert!(orphan.exists());
+    std::fs::write(dotfiles.path().join("roles/dev.toml"), "packages = []\n").unwrap();
+
+    Command::cargo_bin("dotm")
+        .unwrap()
+        .env("HOME", home.path())
+        .args([
+            "-d",
+            dotfiles.path().to_str().unwrap(),
+            "deploy",
+            "--host",
+            "testhost",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Run 'dotm prune'"));
+
+    Command::cargo_bin("dotm")
+        .unwrap()
+        .env("HOME", home.path())
+        .args([
+            "-d",
+            dotfiles.path().to_str().unwrap(),
+            "prune",
+            "--host",
+            "testhost",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("would prune 1 orphaned files"));
+    assert!(
+        orphan.exists(),
+        "prune --dry-run must not delete the orphan"
+    );
+
+    Command::cargo_bin("dotm")
+        .unwrap()
+        .env("HOME", home.path())
+        .args([
+            "-d",
+            dotfiles.path().to_str().unwrap(),
+            "prune",
+            "--host",
+            "testhost",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Pruned 1 orphaned files"));
+    assert!(!orphan.exists() && !orphan.is_symlink());
+
+    Command::cargo_bin("dotm")
+        .unwrap()
+        .env("HOME", home.path())
+        .args([
+            "-d",
+            dotfiles.path().to_str().unwrap(),
+            "prune",
+            "--host",
+            "testhost",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No orphaned files to prune"));
+}
+
+#[test]
 fn cli_status_no_state() {
     let dotfiles = TempDir::new().unwrap();
     let state_dir = TempDir::new().unwrap();
