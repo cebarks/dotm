@@ -49,6 +49,45 @@ fn deploy_detects_orphaned_files() {
 }
 
 #[test]
+fn deploy_preserves_orphaned_entries_for_later_prune() {
+    let target = TempDir::new().unwrap();
+    let dotfiles = TempDir::new().unwrap();
+    let state_dir = TempDir::new().unwrap();
+
+    copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
+
+    let mut orch = Orchestrator::new(dotfiles.path(), target.path())
+        .unwrap()
+        .with_state_dir(state_dir.path());
+    orch.deploy("testhost", false, false).unwrap();
+
+    std::fs::write(dotfiles.path().join("roles/dev.toml"), "packages = []\n").unwrap();
+
+    let mut orch = Orchestrator::new(dotfiles.path(), target.path())
+        .unwrap()
+        .with_state_dir(state_dir.path());
+    let report = orch.deploy("testhost", false, false).unwrap();
+    let orphan = target.path().join(".config/nvim/init.lua");
+    assert!(report.orphaned.contains(&orphan));
+    assert!(orphan.exists(), "deploy without auto_prune must leave the file");
+
+    let state = dotm::state::DeployState::load(state_dir.path()).unwrap();
+    assert!(
+        state.entries().iter().any(|entry| entry.target == orphan),
+        "the orphan must remain tracked so dotm prune can find it"
+    );
+
+    let mut prune_scan = Orchestrator::new(dotfiles.path(), target.path())
+        .unwrap()
+        .with_state_dir(state_dir.path());
+    let prune_report = prune_scan.deploy("testhost", true, false).unwrap();
+    assert!(
+        prune_report.orphaned.contains(&orphan),
+        "a later dry-run scan must still identify the orphan"
+    );
+}
+
+#[test]
 fn auto_prune_removes_orphaned_files() {
     let target = TempDir::new().unwrap();
     let dotfiles = TempDir::new().unwrap();

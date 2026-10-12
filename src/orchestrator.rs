@@ -502,15 +502,12 @@ impl Orchestrator {
         // Phase 5: Save state (including partial state on error, so deployed files are tracked)
         if !dry_run && self.state_dir.is_some() {
             // Merge: keep old entries for targets we didn't deploy this run,
-            // but drop ones Phase 4.5 already flagged as orphaned so pruned
-            // (or prune-eligible) entries don't get resurrected.
+            // except entries that Phase 4.5 actually removed via auto-prune.
             let deployed_targets: HashSet<PathBuf> =
                 state.entries().iter().map(|e| e.target.clone()).collect();
-            let orphaned_targets: HashSet<&PathBuf> = report.orphaned.iter().collect();
+            let pruned_targets: HashSet<&PathBuf> = report.pruned.iter().collect();
             for old in existing_state.entries() {
-                if !deployed_targets.contains(&old.target)
-                    && !orphaned_targets.contains(&old.target)
-                {
+                if !deployed_targets.contains(&old.target) && !pruned_targets.contains(&old.target) {
                     state.record(old.clone());
                 }
             }

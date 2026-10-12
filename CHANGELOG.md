@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Bug Fixes
+
+- Preserve orphaned deployment state when `auto_prune` is disabled, so a later `dotm prune` can find and remove the orphaned files
+
 ### Added
 
 - **Setup command**: `dotm setup` runs one-time/occasional imperative package initialization tasks (package manager bundles, OS preference commands, dependency installs), independent from file deployment
