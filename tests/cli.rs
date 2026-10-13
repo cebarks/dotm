@@ -20,6 +20,15 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
     }
 }
 
+fn isolated_dotm_command(dotfiles: &Path, home: &Path) -> Command {
+    let mut command = Command::cargo_bin("dotm").unwrap();
+    command
+        .env("HOME", home)
+        .env("XDG_STATE_HOME", home.join(".xdg-state"))
+        .args(["-d", dotfiles.to_str().unwrap()]);
+    command
+}
+
 #[test]
 fn cli_version() {
     Command::cargo_bin("dotm")
@@ -105,16 +114,8 @@ fn cli_prune_removes_orphan_after_deploy_warning() {
     let home = TempDir::new().unwrap();
     copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
 
-    Command::cargo_bin("dotm")
-        .unwrap()
-        .env("HOME", home.path())
-        .args([
-            "-d",
-            dotfiles.path().to_str().unwrap(),
-            "deploy",
-            "--host",
-            "testhost",
-        ])
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["deploy", "--host", "testhost"])
         .assert()
         .success();
 
@@ -122,31 +123,14 @@ fn cli_prune_removes_orphan_after_deploy_warning() {
     assert!(orphan.exists());
     std::fs::write(dotfiles.path().join("roles/dev.toml"), "packages = []\n").unwrap();
 
-    Command::cargo_bin("dotm")
-        .unwrap()
-        .env("HOME", home.path())
-        .args([
-            "-d",
-            dotfiles.path().to_str().unwrap(),
-            "deploy",
-            "--host",
-            "testhost",
-        ])
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["deploy", "--host", "testhost"])
         .assert()
         .success()
         .stderr(predicate::str::contains("Run 'dotm prune'"));
 
-    Command::cargo_bin("dotm")
-        .unwrap()
-        .env("HOME", home.path())
-        .args([
-            "-d",
-            dotfiles.path().to_str().unwrap(),
-            "prune",
-            "--host",
-            "testhost",
-            "--dry-run",
-        ])
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["prune", "--host", "testhost", "--dry-run"])
         .assert()
         .success()
         .stdout(predicate::str::contains("would prune 1 orphaned files"));
@@ -155,35 +139,107 @@ fn cli_prune_removes_orphan_after_deploy_warning() {
         "prune --dry-run must not delete the orphan"
     );
 
-    Command::cargo_bin("dotm")
-        .unwrap()
-        .env("HOME", home.path())
-        .args([
-            "-d",
-            dotfiles.path().to_str().unwrap(),
-            "prune",
-            "--host",
-            "testhost",
-        ])
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["prune", "--host", "testhost"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Pruned 1 orphaned files"));
     assert!(!orphan.exists() && !orphan.is_symlink());
 
-    Command::cargo_bin("dotm")
-        .unwrap()
-        .env("HOME", home.path())
-        .args([
-            "-d",
-            dotfiles.path().to_str().unwrap(),
-            "prune",
-            "--host",
-            "testhost",
-            "--dry-run",
-        ])
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["prune", "--host", "testhost", "--dry-run"])
         .assert()
         .success()
         .stdout(predicate::str::contains("No orphaned files to prune"));
+}
+
+#[test]
+fn cli_auto_prune_reports_partial_failure() {
+    let dotfiles = TempDir::new().unwrap();
+    let home = TempDir::new().unwrap();
+    copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
+
+    std::fs::create_dir_all(dotfiles.path().join("packages/editor/.config/nvim")).unwrap();
+    std::fs::write(
+        dotfiles
+            .path()
+            .join("packages/editor/.config/nvim/extra.conf"),
+        "extra",
+    )
+    .unwrap();
+    let config = std::fs::read_to_string(dotfiles.path().join("dotm.toml")).unwrap();
+    std::fs::write(
+        dotfiles.path().join("dotm.toml"),
+        config.replace(
+            "[dotm]\ntarget = \"~\"",
+            "[dotm]\ntarget = \"~\"\nauto_prune = true",
+        ),
+    )
+    .unwrap();
+
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["deploy", "--host", "testhost"])
+        .assert()
+        .success();
+
+    let failed_orphan = home.path().join(".config/nvim/init.lua");
+    std::fs::remove_file(&failed_orphan).unwrap();
+    std::fs::create_dir(&failed_orphan).unwrap();
+    std::fs::write(failed_orphan.join("blocker"), "keep directory non-empty").unwrap();
+    std::fs::write(dotfiles.path().join("roles/dev.toml"), "packages = []\n").unwrap();
+
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["deploy", "--host", "testhost"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Pruned 1 orphaned files"))
+        .stderr(predicate::str::contains("failed to prune orphaned file"))
+        .stderr(predicate::str::contains("orphaned files remain"))
+        .stderr(predicate::str::contains("Run 'dotm prune'"));
+    assert!(failed_orphan.is_dir());
+
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["prune", "--host", "testhost", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("would prune 1 orphaned files"));
+}
+
+#[test]
+fn cli_prune_keeps_state_when_deletion_fails() {
+    let dotfiles = TempDir::new().unwrap();
+    let home = TempDir::new().unwrap();
+    copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
+
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["deploy", "--host", "testhost"])
+        .assert()
+        .success();
+
+    let orphan = home.path().join(".config/nvim/init.lua");
+    std::fs::write(dotfiles.path().join("roles/dev.toml"), "packages = []\n").unwrap();
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["deploy", "--host", "testhost"])
+        .assert()
+        .success();
+
+    std::fs::remove_file(&orphan).unwrap();
+    std::fs::create_dir(&orphan).unwrap();
+    std::fs::write(orphan.join("blocker"), "keep directory non-empty").unwrap();
+
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["prune", "--host", "testhost"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No orphaned files were pruned"))
+        .stderr(predicate::str::contains("failed to remove orphaned file"));
+    assert!(orphan.is_dir());
+
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["prune", "--host", "testhost", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("would prune 1 orphaned files"));
 }
 
 #[test]

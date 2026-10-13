@@ -4,7 +4,7 @@
 
 ### Bug Fixes
 
-- Preserve existing orphaned deployment state when `auto_prune` is disabled, allowing a later `dotm prune` to find and remove those files; drop already-missing orphans from state and retain state when auto-prune cannot remove a target
+- Keep existing orphaned files tracked and visible in `dotm status` until pruning; discard already-missing orphan entries, and preserve state with a warning when automatic or explicit prune cannot delete a target
 
 ### Added
 
