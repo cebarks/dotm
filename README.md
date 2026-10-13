@@ -285,11 +285,13 @@ Setup execution is tracked in `setup-state.json` (alongside `dotm-state.json`) a
 When files are removed from a package or a package is removed from a role, previously deployed files become "orphans." dotm detects these on deploy and warns about them:
 
 ```bash
-Warning: 2 orphaned files (no longer managed):
+Warning: 2 orphaned files remain:
   ? /home/user/.config/old.conf
   ? /home/user/.config/removed.conf
-Run 'dotm prune' to clean up, or set auto_prune = true in dotm.toml.
+Run 'dotm prune' to clean up.
 ```
+
+Orphaned files that remain on disk stay tracked and visible in `dotm status` until pruned. `dotm sync` reports the same orphan summary. Already-missing orphan targets are removed from state; if automatic pruning cannot delete a target, dotm warns and keeps it tracked.
 
 To automatically remove orphans on every deploy:
 

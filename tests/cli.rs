@@ -29,6 +29,19 @@ fn isolated_dotm_command(dotfiles: &Path, home: &Path) -> Command {
     command
 }
 
+fn run_git(directory: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(directory)
+        .output()
+        .expect("git should run");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn cli_version() {
     Command::cargo_bin("dotm")
@@ -91,18 +104,11 @@ fn cli_init_creates_package_dir() {
 #[test]
 fn cli_deploy_dry_run() {
     let dotfiles = TempDir::new().unwrap();
+    let home = TempDir::new().unwrap();
     copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
 
-    Command::cargo_bin("dotm")
-        .unwrap()
-        .args([
-            "-d",
-            dotfiles.path().to_str().unwrap(),
-            "deploy",
-            "--host",
-            "testhost",
-            "--dry-run",
-        ])
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["deploy", "--host", "testhost", "--dry-run"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Dry run"));
@@ -240,6 +246,67 @@ fn cli_prune_keeps_state_when_deletion_fails() {
         .assert()
         .success()
         .stdout(predicate::str::contains("would prune 1 orphaned files"));
+}
+
+#[test]
+fn cli_prune_does_not_redeploy_modified_managed_files() {
+    let dotfiles = TempDir::new().unwrap();
+    let home = TempDir::new().unwrap();
+    copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
+    let template = dotfiles
+        .path()
+        .join("packages/shell/.config/dotm/test.conf.tera");
+    std::fs::create_dir_all(template.parent().unwrap()).unwrap();
+    std::fs::write(&template, "managed version").unwrap();
+
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["deploy", "--host", "testhost"])
+        .assert()
+        .success();
+
+    let active_target = home.path().join(".config/dotm/test.conf");
+    assert_eq!(
+        std::fs::read_to_string(&active_target).unwrap(),
+        "managed version"
+    );
+    std::fs::write(&active_target, "user edit").unwrap();
+    std::fs::write(dotfiles.path().join("roles/dev.toml"), "packages = []\n").unwrap();
+
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["prune", "--host", "testhost"])
+        .assert()
+        .success();
+
+    assert_eq!(std::fs::read_to_string(active_target).unwrap(), "user edit");
+}
+
+#[test]
+fn cli_sync_reports_orphan_files() {
+    let dotfiles = TempDir::new().unwrap();
+    let home = TempDir::new().unwrap();
+    copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
+
+    run_git(dotfiles.path(), &["init", "--quiet"]);
+    run_git(dotfiles.path(), &["config", "user.name", "Dotm Test"]);
+    run_git(
+        dotfiles.path(),
+        &["config", "user.email", "dotm-test@example.com"],
+    );
+    run_git(dotfiles.path(), &["add", "-A"]);
+    run_git(dotfiles.path(), &["commit", "--quiet", "-m", "fixture"]);
+
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["sync", "--host", "testhost", "--no-push"])
+        .assert()
+        .success();
+
+    std::fs::write(dotfiles.path().join("roles/dev.toml"), "packages = []\n").unwrap();
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["sync", "--host", "testhost", "--no-push"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("orphaned files remain"))
+        .stderr(predicate::str::contains("Run 'dotm prune'"));
 }
 
 #[test]

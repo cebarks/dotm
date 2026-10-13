@@ -301,28 +301,7 @@ fn main() -> anyhow::Result<()> {
                         eprintln!("  ! {} — {}", path.display(), msg);
                     }
                 }
-                if !report.pruned.is_empty() {
-                    println!("Pruned {} orphaned files.", report.pruned.len());
-                }
-                let pruned_targets: std::collections::HashSet<&PathBuf> =
-                    report.pruned.iter().collect();
-                let remaining_orphans: Vec<&PathBuf> = report
-                    .orphaned
-                    .iter()
-                    .filter(|path| {
-                        !pruned_targets.contains(path) && (path.exists() || path.is_symlink())
-                    })
-                    .collect();
-                if !remaining_orphans.is_empty() {
-                    eprintln!(
-                        "Warning: {} orphaned files remain:",
-                        remaining_orphans.len()
-                    );
-                    for path in remaining_orphans {
-                        eprintln!("  ? {}", path.display());
-                    }
-                    eprintln!("Run 'dotm prune' to clean up.");
-                }
+                print_orphan_report(&report);
             }
 
             if !report.conflicts.is_empty() {
@@ -1079,20 +1058,26 @@ fn main() -> anyhow::Result<()> {
                 dotm_state_dir()
             };
 
-            // Load existing state to find what's currently managed.
-            // Use load() not load_locked() — the orchestrator's deploy() acquires
-            // its own lock, and holding two flock fds on the same file deadlocks.
-            let mut existing_state = dotm::state::DeployState::load(&state_dir)?;
-            if existing_state.entries().is_empty() {
+            let state_before_scan = dotm::state::DeployState::load(&state_dir)?;
+            if state_before_scan.entries().is_empty() {
                 println!("No files currently managed by dotm.");
                 return Ok(());
             }
 
-            // Run a deploy scan to determine what *would* be deployed now
+            // Run a deploy scan to determine what *would* be deployed now.
             let mut orch = Orchestrator::new(&cli.dir, &target_dir)?
                 .with_state_dir(&state_dir)
                 .with_system_mode(system);
-            let report = orch.deploy(&hostname, true, false)?; // dry run to get the target set
+            let report = orch.deploy(&hostname, true, false)?;
+
+            // Lock the current state before deleting targets or saving. If it
+            // changed during the scan, the target list may no longer be safe.
+            let mut existing_state = dotm::state::DeployState::load_locked(&state_dir)?;
+            if serde_json::to_vec(state_before_scan.entries())?
+                != serde_json::to_vec(existing_state.entries())?
+            {
+                anyhow::bail!("deployment state changed during prune; rerun 'dotm prune'");
+            }
 
             let new_targets: std::collections::HashSet<std::path::PathBuf> = report
                 .dry_run_actions
@@ -1144,20 +1129,8 @@ fn main() -> anyhow::Result<()> {
                 if pruned_targets.is_empty() {
                     println!("No orphaned files were pruned.");
                 } else {
-                    // Remove pruned entries from state before re-deploy so state
-                    // stays consistent even if re-deploy fails.
-                    // No lock held here — load() was used to avoid deadlock with
-                    // orchestrator's deploy(). Narrow race if two dotm processes
-                    // prune concurrently; acceptable for a single-user CLI tool.
                     existing_state.remove_targets(&pruned_targets);
                     existing_state.save()?;
-                    drop(existing_state);
-
-                    // Re-deploy to update state without pruned entries.
-                    let mut orch2 = Orchestrator::new(&cli.dir, &target_dir)?
-                        .with_state_dir(&state_dir)
-                        .with_system_mode(system);
-                    orch2.deploy(&hostname, false, true)?;
                     println!("Pruned {} orphaned files.", pruned_targets.len());
                 }
             } else {
@@ -1245,6 +1218,7 @@ fn main() -> anyhow::Result<()> {
                     eprintln!("  ! {} — {}", path.display(), msg);
                 }
             }
+            print_orphan_report(&report);
 
             // Step 3: Push (unless --no-push)
             if !no_push {
@@ -1270,6 +1244,29 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn print_orphan_report(report: &dotm::orchestrator::DeployReport) {
+    if !report.pruned.is_empty() {
+        println!("Pruned {} orphaned files.", report.pruned.len());
+    }
+
+    let pruned_targets: std::collections::HashSet<&PathBuf> = report.pruned.iter().collect();
+    let remaining_orphans: Vec<&PathBuf> = report
+        .orphaned
+        .iter()
+        .filter(|path| !pruned_targets.contains(path) && (path.exists() || path.is_symlink()))
+        .collect();
+    if !remaining_orphans.is_empty() {
+        eprintln!(
+            "Warning: {} orphaned files remain:",
+            remaining_orphans.len()
+        );
+        for path in remaining_orphans {
+            eprintln!("  ? {}", path.display());
+        }
+        eprintln!("Run 'dotm prune' to clean up.");
+    }
 }
 
 fn dotm_state_dir() -> PathBuf {
