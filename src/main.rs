@@ -282,6 +282,7 @@ fn main() -> anyhow::Result<()> {
                 for path in &report.dry_run_actions {
                     println!("  {}", path.display());
                 }
+                print_orphan_report(&report);
             } else {
                 if !report.created.is_empty() {
                     println!("Created {} files:", report.created.len());
@@ -1073,23 +1074,17 @@ fn main() -> anyhow::Result<()> {
             // Lock the current state before deleting targets or saving. If it
             // changed during the scan, the target list may no longer be safe.
             let mut existing_state = dotm::state::DeployState::load_locked(&state_dir)?;
-            if serde_json::to_vec(state_before_scan.entries())?
-                != serde_json::to_vec(existing_state.entries())?
-            {
+            if !state_entries_unchanged(state_before_scan.entries(), existing_state.entries())? {
                 anyhow::bail!("deployment state changed during prune; rerun 'dotm prune'");
             }
 
-            let new_targets: std::collections::HashSet<std::path::PathBuf> = report
-                .dry_run_actions
-                .iter()
-                .cloned()
-                .chain(report.conflicts.iter().map(|(path, _)| path.clone()))
-                .collect();
+            let orphaned_targets: std::collections::HashSet<&PathBuf> =
+                report.orphaned.iter().collect();
 
             let mut pruned_targets = Vec::new();
             let mut orphan_count = 0;
             for entry in existing_state.entries() {
-                if !new_targets.contains(&entry.target) {
+                if orphaned_targets.contains(&entry.target) {
                     orphan_count += 1;
                     if dry_run {
                         println!("  ? {}", entry.target.display());
@@ -1266,6 +1261,52 @@ fn print_orphan_report(report: &dotm::orchestrator::DeployReport) {
             eprintln!("  ? {}", path.display());
         }
         eprintln!("Run 'dotm prune' to clean up.");
+    }
+}
+
+fn state_entries_unchanged(
+    before: &[dotm::state::DeployEntry],
+    current: &[dotm::state::DeployEntry],
+) -> anyhow::Result<bool> {
+    Ok(serde_json::to_vec(before)? == serde_json::to_vec(current)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dotm::scanner::EntryKind;
+    use dotm::state::{DeployEntry, DeployState};
+    use std::path::Path;
+
+    fn entry(target: &str) -> DeployEntry {
+        DeployEntry {
+            target: PathBuf::from(target),
+            staged: None,
+            source: PathBuf::from("source"),
+            content_hash: "hash".to_string(),
+            original_hash: None,
+            kind: EntryKind::Base,
+            package: "test".to_string(),
+            owner: None,
+            group: None,
+            mode: None,
+            original_owner: None,
+            original_group: None,
+            original_mode: None,
+        }
+    }
+
+    #[test]
+    fn prune_state_snapshot_detects_entry_changes() {
+        let mut before = DeployState::new(Path::new("unused"));
+        before.record(entry("/target"));
+        let mut current = DeployState::new(Path::new("unused"));
+        current.record(entry("/target"));
+
+        assert!(state_entries_unchanged(before.entries(), current.entries()).unwrap());
+
+        current.update_entry_hash(0, "changed".to_string());
+        assert!(!state_entries_unchanged(before.entries(), current.entries()).unwrap());
     }
 }
 

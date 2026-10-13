@@ -115,6 +115,28 @@ fn cli_deploy_dry_run() {
 }
 
 #[test]
+fn cli_deploy_dry_run_reports_orphans() {
+    let dotfiles = TempDir::new().unwrap();
+    let home = TempDir::new().unwrap();
+    copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
+
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["deploy", "--host", "testhost"])
+        .assert()
+        .success();
+    std::fs::write(dotfiles.path().join("roles/dev.toml"), "packages = []\n").unwrap();
+
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["deploy", "--host", "testhost", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Dry run"))
+        .stderr(predicate::str::contains("orphaned files remain"))
+        .stderr(predicate::str::contains("Run 'dotm prune'"));
+    assert!(home.path().join(".config/nvim/init.lua").exists());
+}
+
+#[test]
 fn cli_prune_removes_orphan_after_deploy_warning() {
     let dotfiles = TempDir::new().unwrap();
     let home = TempDir::new().unwrap();
@@ -293,7 +315,17 @@ fn cli_sync_reports_orphan_files() {
         &["config", "user.email", "dotm-test@example.com"],
     );
     run_git(dotfiles.path(), &["add", "-A"]);
-    run_git(dotfiles.path(), &["commit", "--quiet", "-m", "fixture"]);
+    run_git(
+        dotfiles.path(),
+        &[
+            "commit",
+            "--quiet",
+            "--no-gpg-sign",
+            "--no-verify",
+            "-m",
+            "fixture",
+        ],
+    );
 
     isolated_dotm_command(dotfiles.path(), home.path())
         .args(["sync", "--host", "testhost", "--no-push"])

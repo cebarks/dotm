@@ -291,7 +291,7 @@ Warning: 2 orphaned files remain:
 Run 'dotm prune' to clean up.
 ```
 
-Orphaned files that remain on disk stay tracked and visible in `dotm status` until pruned. `dotm sync` reports the same orphan summary. Already-missing orphan targets are removed from state; if automatic pruning cannot delete a target, dotm warns and keeps it tracked.
+Orphaned files that remain on disk stay tracked and visible in `dotm status` until pruned. `dotm deploy --dry-run` and `dotm sync` report the same orphan summary. Already-missing orphan targets are removed from state; if automatic pruning cannot delete a target, dotm warns and keeps it tracked.
 
 To automatically remove orphans on every deploy:
 
