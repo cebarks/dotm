@@ -337,8 +337,21 @@ impl DeployState {
 
     pub fn load_original(&self, content_hash: &str) -> Result<Vec<u8>> {
         let path = self.originals_dir().join(content_hash);
-        std::fs::read(&path)
-            .with_context(|| format!("failed to load original content: {}", path.display()))
+        match std::fs::read(&path) {
+            Ok(content) => Ok(content),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let legacy = self.state_dir.join("deployed").join(content_hash);
+                std::fs::read(&legacy).with_context(|| {
+                    format!(
+                        "failed to load original content from {} or {}",
+                        path.display(),
+                        legacy.display()
+                    )
+                })
+            }
+            Err(error) => Err(error)
+                .with_context(|| format!("failed to load original content: {}", path.display())),
+        }
     }
 
     pub fn migrate_storage(state_dir: &Path) -> Result<()> {
@@ -393,6 +406,12 @@ impl DeployState {
             let result: Result<()> = (|| {
                 if let Some(ref orig_hash) = entry.original_hash {
                     let original_content = self.load_original(orig_hash)?;
+                    remove_target(&entry.target).with_context(|| {
+                        format!(
+                            "failed to remove existing target before restore: {}",
+                            entry.target.display()
+                        )
+                    })?;
                     std::fs::write(&entry.target, &original_content).with_context(|| {
                         format!("failed to restore: {}", entry.target.display())
                     })?;

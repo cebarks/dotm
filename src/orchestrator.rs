@@ -252,6 +252,12 @@ impl Orchestrator {
             .map(|e| e.target.clone())
             .collect();
 
+        let existing_entries: HashMap<PathBuf, &DeployEntry> = existing_state
+            .entries()
+            .iter()
+            .map(|entry| (entry.target.clone(), entry))
+            .collect();
+
         // Phase 4: Deploy each action (with per-package hooks)
         let mut current_pkg: Option<String> = None;
         let mut skip_pkg: Option<String> = None;
@@ -352,12 +358,20 @@ impl Orchestrator {
                     force
                 };
 
-                let is_managed = existing_targets.contains(&target_path);
-
                 // Backup pre-existing file content and metadata before deploying
                 // Skip backup for managed re-deploys (preserve the original pre-dotm content)
                 let (original_hash, original_owner, original_group, original_mode) =
-                    if !dry_run && !is_managed && target_path.exists() && !target_path.is_symlink()
+                    if let Some(previous) = existing_entries.get(&target_path) {
+                        (
+                            previous.original_hash.clone(),
+                            previous.original_owner.clone(),
+                            previous.original_group.clone(),
+                            previous.original_mode.clone(),
+                        )
+                    } else if !dry_run
+                        && target_path.exists()
+                        && !target_path.is_symlink()
+                        && !target_path.is_dir()
                     {
                         let content = std::fs::read(&target_path)?;
                         let hash = hash::hash_content(&content);

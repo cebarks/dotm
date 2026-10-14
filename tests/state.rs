@@ -625,6 +625,63 @@ fn restore_error_propagates_over_save_error() {
 }
 
 #[test]
+fn load_original_reads_legacy_deployed_storage_after_migration() {
+    let state_dir = TempDir::new().unwrap();
+    let originals = state_dir.path().join("originals");
+    let deployed = state_dir.path().join("deployed");
+    std::fs::create_dir_all(&originals).unwrap();
+    std::fs::create_dir_all(&deployed).unwrap();
+    std::fs::write(originals.join("unrelated"), "new storage").unwrap();
+    std::fs::write(deployed.join("legacy-hash"), "legacy original").unwrap();
+
+    DeployState::migrate_storage(state_dir.path()).unwrap();
+    let state = DeployState::new(state_dir.path());
+
+    assert_eq!(
+        state.load_original("legacy-hash").unwrap(),
+        b"legacy original"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn restore_unlinks_target_symlink_before_writing_original() {
+    let state_dir = TempDir::new().unwrap();
+    let target_dir = TempDir::new().unwrap();
+    let external_dir = TempDir::new().unwrap();
+    let target = target_dir.path().join("managed.conf");
+    let external = external_dir.path().join("external.conf");
+    std::fs::write(&external, "external content").unwrap();
+    std::os::unix::fs::symlink(&external, &target).unwrap();
+    let original = b"original content";
+    let original_hash = dotm::hash::hash_content(original);
+
+    let mut state = DeployState::new(state_dir.path());
+    state.store_original(&original_hash, original).unwrap();
+    state.record(DeployEntry {
+        target: target.clone(),
+        staged: None,
+        source: PathBuf::from("source"),
+        content_hash: "managed-hash".to_string(),
+        original_hash: Some(original_hash),
+        kind: EntryKind::Override,
+        package: "test".to_string(),
+        owner: None,
+        group: None,
+        mode: None,
+        original_owner: None,
+        original_group: None,
+        original_mode: None,
+    });
+
+    state.restore(None).unwrap();
+
+    assert!(!target.is_symlink());
+    assert_eq!(std::fs::read(&target).unwrap(), original);
+    assert_eq!(std::fs::read(&external).unwrap(), b"external content");
+}
+
+#[test]
 fn restore_writes_back_original_content() {
     let target_dir = TempDir::new().unwrap();
     let temp_base = TempDir::new().unwrap();

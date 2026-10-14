@@ -2,6 +2,82 @@ use dotm::orchestrator::Orchestrator;
 use std::path::Path;
 use tempfile::TempDir;
 
+fn copy_dir_recursive(src: &Path, dst: &Path) {
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            if src_path.file_name().unwrap() == ".staged" {
+                continue;
+            }
+            std::fs::create_dir_all(&dst_path).unwrap();
+            copy_dir_recursive(&src_path, &dst_path);
+        } else {
+            std::fs::copy(&src_path, &dst_path).unwrap();
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn redeploy_preserves_original_backup_and_mode_for_restore() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let target_dir = TempDir::new().unwrap();
+    let dotfiles_dir = TempDir::new().unwrap();
+    let state_dir = TempDir::new().unwrap();
+    copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles_dir.path());
+
+    let source = dotfiles_dir
+        .path()
+        .join("packages/editor/.config/nvim/init.lua.tera");
+    std::fs::write(&source, "managed version one").unwrap();
+    let target = target_dir.path().join(".config/nvim/init.lua");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    let original = b"pre-dotm content";
+    std::fs::write(&target, original).unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+    let mut first_deploy = Orchestrator::new(dotfiles_dir.path(), target_dir.path())
+        .unwrap()
+        .with_state_dir(state_dir.path());
+    first_deploy.deploy("testhost", false, true).unwrap();
+    let state_after_first = dotm::state::DeployState::load(state_dir.path()).unwrap();
+    let first_entry = state_after_first
+        .entries()
+        .iter()
+        .find(|entry| entry.target == target)
+        .unwrap()
+        .clone();
+    assert!(first_entry.original_hash.is_some());
+    assert!(first_entry.original_mode.is_some());
+
+    std::fs::write(&source, "managed version two").unwrap();
+    let mut second_deploy = Orchestrator::new(dotfiles_dir.path(), target_dir.path())
+        .unwrap()
+        .with_state_dir(state_dir.path());
+    let report = second_deploy.deploy("testhost", false, false).unwrap();
+    assert!(report.updated.contains(&target));
+
+    let state_after_second = dotm::state::DeployState::load(state_dir.path()).unwrap();
+    let second_entry = state_after_second
+        .entries()
+        .iter()
+        .find(|entry| entry.target == target)
+        .unwrap();
+    assert_eq!(second_entry.original_hash, first_entry.original_hash);
+    assert_eq!(second_entry.original_mode, first_entry.original_mode);
+
+    let mut state = state_after_second;
+    state.restore(None).unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), original);
+    assert_eq!(
+        std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+}
+
 #[test]
 fn full_deploy_basic_fixture() {
     let target_dir = TempDir::new().unwrap();
