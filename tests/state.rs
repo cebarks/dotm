@@ -2,8 +2,27 @@ use dotm::scanner::EntryKind;
 #[allow(deprecated)]
 use dotm::state::cleanup_empty_parents;
 use dotm::state::{DeployEntry, DeployState, TargetRoots, cleanup_empty_parents_within};
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
+
+fn make_entry(target: &Path, package: &str, original_hash: Option<&str>) -> DeployEntry {
+    DeployEntry {
+        target: target.to_path_buf(),
+        staged: None,
+        source: PathBuf::from("source"),
+        content_hash: "managed".to_string(),
+        original_hash: original_hash.map(str::to_string),
+        kind: EntryKind::Base,
+        package: package.to_string(),
+        owner: None,
+        group: None,
+        mode: None,
+        original_owner: None,
+        original_group: None,
+        original_mode: None,
+    }
+}
 
 #[test]
 fn state_save_includes_version() {
@@ -625,6 +644,219 @@ fn restore_error_propagates_over_save_error() {
 }
 
 #[test]
+fn cleanup_unreferenced_originals_deletes_candidates_from_both_stores() {
+    let state_dir = TempDir::new().unwrap();
+    let originals = state_dir.path().join("originals");
+    let deployed = state_dir.path().join("deployed");
+    std::fs::create_dir_all(&originals).unwrap();
+    std::fs::create_dir_all(&deployed).unwrap();
+    std::fs::write(originals.join("candidate"), "current backup").unwrap();
+    std::fs::write(deployed.join("candidate"), "legacy backup").unwrap();
+    std::fs::write(originals.join("unrelated"), "retain").unwrap();
+    let state = DeployState::new(state_dir.path());
+    let candidates = HashSet::from(["candidate".to_string()]);
+
+    state.cleanup_unreferenced_originals(&candidates).unwrap();
+
+    assert!(!originals.join("candidate").exists());
+    assert!(!deployed.join("candidate").exists());
+    assert!(originals.join("unrelated").exists());
+}
+
+#[test]
+fn cleanup_unreferenced_originals_retains_shared_hashes() {
+    let state_dir = TempDir::new().unwrap();
+    let originals = state_dir.path().join("originals");
+    std::fs::create_dir_all(&originals).unwrap();
+    std::fs::write(originals.join("shared"), "backup").unwrap();
+    let mut state = DeployState::new(state_dir.path());
+    state.record(make_entry(Path::new("/first"), "first", Some("shared")));
+    state.record(make_entry(Path::new("/second"), "second", Some("shared")));
+
+    state
+        .cleanup_unreferenced_originals(&HashSet::from(["shared".to_string()]))
+        .unwrap();
+
+    assert!(originals.join("shared").exists());
+}
+
+#[test]
+fn unreferenced_original_hashes_exclude_hashes_still_referenced() {
+    let before = vec![
+        make_entry(Path::new("/first"), "first", Some("superseded")),
+        make_entry(Path::new("/second"), "second", Some("shared")),
+    ];
+    let after = vec![make_entry(Path::new("/second"), "second", Some("shared"))];
+
+    assert_eq!(
+        dotm::state::unreferenced_original_hashes(&before, &after),
+        HashSet::from(["superseded".to_string()])
+    );
+}
+
+#[test]
+fn filtered_restore_keeps_backup_until_its_last_reference_is_removed() {
+    let state_dir = TempDir::new().unwrap();
+    let targets = TempDir::new().unwrap();
+    let originals = state_dir.path().join("originals");
+    let deployed = state_dir.path().join("deployed");
+    std::fs::create_dir_all(&deployed).unwrap();
+    let first_target = targets.path().join("first");
+    let second_target = targets.path().join("second");
+    std::fs::write(&first_target, "managed first").unwrap();
+    std::fs::write(&second_target, "managed second").unwrap();
+
+    let mut state = DeployState::new(state_dir.path());
+    state.store_original("shared", b"original").unwrap();
+    std::fs::write(deployed.join("shared"), "legacy duplicate").unwrap();
+    state.record(make_entry(&first_target, "first", Some("shared")));
+    state.record(make_entry(&second_target, "second", Some("shared")));
+    state.save().unwrap();
+
+    state.restore(Some("first")).unwrap();
+    assert!(originals.join("shared").exists());
+    assert!(deployed.join("shared").exists());
+
+    state.restore(Some("second")).unwrap();
+
+    assert!(!originals.join("shared").exists());
+    assert!(!deployed.join("shared").exists());
+}
+
+#[test]
+fn filtered_undeploy_keeps_backup_until_its_last_reference_is_removed() {
+    let state_dir = TempDir::new().unwrap();
+    let targets = TempDir::new().unwrap();
+    let originals = state_dir.path().join("originals");
+    let deployed = state_dir.path().join("deployed");
+    std::fs::create_dir_all(&deployed).unwrap();
+    let first_target = targets.path().join("first");
+    let second_target = targets.path().join("second");
+    std::fs::write(&first_target, "managed first").unwrap();
+    std::fs::write(&second_target, "managed second").unwrap();
+
+    let mut state = DeployState::new(state_dir.path());
+    state.store_original("shared", b"original").unwrap();
+    std::fs::write(deployed.join("shared"), "legacy duplicate").unwrap();
+    state.record(make_entry(&first_target, "first", Some("shared")));
+    state.record(make_entry(&second_target, "second", Some("shared")));
+
+    state
+        .undeploy_package("first", None, state_dir.path())
+        .unwrap();
+    assert!(originals.join("shared").exists());
+    assert!(deployed.join("shared").exists());
+
+    state
+        .undeploy_package("second", None, state_dir.path())
+        .unwrap();
+
+    assert!(!originals.join("shared").exists());
+    assert!(!deployed.join("shared").exists());
+}
+
+#[test]
+fn undeploy_all_reclaims_original_backups_after_saving_empty_state() {
+    let state_dir = TempDir::new().unwrap();
+    let target_dir = TempDir::new().unwrap();
+    let target = target_dir.path().join("managed");
+    std::fs::write(&target, "managed").unwrap();
+    let originals = state_dir.path().join("originals");
+    let deployed = state_dir.path().join("deployed");
+    std::fs::create_dir_all(&deployed).unwrap();
+
+    let mut state = DeployState::new(state_dir.path());
+    state.store_original("original", b"backup").unwrap();
+    std::fs::write(deployed.join("original"), "legacy backup").unwrap();
+    state.record(make_entry(&target, "test", Some("original")));
+    state.save().unwrap();
+
+    state.undeploy(None, state_dir.path()).unwrap();
+
+    assert!(!target.exists());
+    assert!(!originals.join("original").exists());
+    assert!(!deployed.join("original").exists());
+    assert!(!state_dir.path().join("dotm-state.json").exists());
+}
+
+#[test]
+fn restore_does_not_delete_backup_when_state_save_fails() {
+    let state_dir = TempDir::new().unwrap();
+    let target_dir = TempDir::new().unwrap();
+    let target = target_dir.path().join("managed");
+    std::fs::write(&target, "managed").unwrap();
+    let mut state = DeployState::new(state_dir.path());
+    state.store_original("saved", b"original").unwrap();
+    state.record(make_entry(&target, "test", Some("saved")));
+    let backup = state.originals_dir().join("saved");
+    std::fs::create_dir(state_dir.path().join("dotm-state.json")).unwrap();
+
+    assert!(state.restore(None).is_err());
+
+    assert!(backup.is_file());
+}
+
+#[test]
+fn partial_restore_reclaims_backups_for_entries_removed_from_saved_state() {
+    let state_dir = TempDir::new().unwrap();
+    let target_dir = TempDir::new().unwrap();
+    let restored_target = target_dir.path().join("restored");
+    std::fs::write(&restored_target, "managed content").unwrap();
+    let mut state = DeployState::new(state_dir.path());
+    state
+        .store_original("restorable", b"original content")
+        .unwrap();
+    state.record(make_entry(&restored_target, "restored", Some("restorable")));
+    state.record(make_entry(
+        Path::new("/nonexistent-root-dir/failing"),
+        "failing",
+        Some("missing"),
+    ));
+    state.save().unwrap();
+
+    assert!(state.restore(None).is_err());
+
+    assert_eq!(
+        std::fs::read(&restored_target).unwrap(),
+        b"original content"
+    );
+    assert!(!state.originals_dir().join("restorable").exists());
+    assert_eq!(state.entries().len(), 1);
+    assert_eq!(state.entries()[0].package, "failing");
+}
+
+#[test]
+fn cleanup_unreferenced_originals_warns_and_continues_on_removal_error() {
+    let state_dir = TempDir::new().unwrap();
+    let hash = "a".repeat(64);
+    let blob_path = state_dir.path().join("originals").join(&hash);
+    std::fs::create_dir_all(&blob_path).unwrap();
+    let state = DeployState::new(state_dir.path());
+
+    state
+        .cleanup_unreferenced_originals(&HashSet::from([hash]))
+        .unwrap();
+
+    assert!(blob_path.is_dir());
+}
+
+#[test]
+fn cleanup_unreferenced_originals_ignores_invalid_hash_paths() {
+    let parent = TempDir::new().unwrap();
+    let state_dir = parent.path().join("state");
+    std::fs::create_dir(&state_dir).unwrap();
+    let victim = parent.path().join("victim");
+    std::fs::write(&victim, "keep outside state").unwrap();
+    let state = DeployState::new(&state_dir);
+
+    state
+        .cleanup_unreferenced_originals(&HashSet::from(["../../victim".to_string()]))
+        .unwrap();
+
+    assert!(victim.exists());
+}
+
+#[test]
 fn load_original_reads_legacy_deployed_storage_after_migration() {
     let state_dir = TempDir::new().unwrap();
     let originals = state_dir.path().join("originals");
@@ -711,7 +943,7 @@ fn restore_writes_back_original_content() {
         staged: None,
         source: PathBuf::from("/source/test.conf"),
         content_hash: dotm::hash::hash_content(b"deployed by dotm"),
-        original_hash: Some(original_hash),
+        original_hash: Some(original_hash.clone()),
         kind: EntryKind::Override,
         package: "test_pkg".to_string(),
         owner: None,
@@ -733,6 +965,7 @@ fn restore_writes_back_original_content() {
         restored_content, original_content,
         "restored content should match original"
     );
+    assert!(!loaded.originals_dir().join(&original_hash).exists());
 }
 
 #[test]

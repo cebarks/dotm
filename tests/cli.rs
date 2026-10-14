@@ -411,6 +411,49 @@ fn cli_prune_saves_successful_removals_before_reporting_failure() {
 }
 
 #[test]
+fn cli_prune_reclaims_original_backup_after_saving_state() {
+    let dotfiles = TempDir::new().unwrap();
+    let home = TempDir::new().unwrap();
+    copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
+    let target = home.path().join(".config/nvim/init.lua");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, "pre-dotm original").unwrap();
+
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["deploy", "--host", "testhost", "--force"])
+        .assert()
+        .success();
+    let state_dir = home.path().join(".dotm");
+    let state = dotm::state::DeployState::load(&state_dir).unwrap();
+    let original_hash = state
+        .entries()
+        .iter()
+        .find(|entry| entry.target == target)
+        .unwrap()
+        .original_hash
+        .clone()
+        .unwrap();
+    let originals = state_dir.join("originals").join(&original_hash);
+    let deployed = state_dir.join("deployed").join(&original_hash);
+    assert!(originals.exists() || deployed.exists());
+    std::fs::write(dotfiles.path().join("roles/dev.toml"), "packages = []\n").unwrap();
+
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["prune", "--host", "testhost"])
+        .assert()
+        .success();
+
+    assert!(!originals.exists() && !deployed.exists());
+    let final_state = dotm::state::DeployState::load(&state_dir).unwrap();
+    assert!(
+        final_state
+            .entries()
+            .iter()
+            .all(|entry| entry.target != target)
+    );
+}
+
+#[test]
 fn cli_prune_preserves_targets_when_package_source_is_missing() {
     let dotfiles = TempDir::new().unwrap();
     let home = TempDir::new().unwrap();

@@ -385,6 +385,7 @@ impl DeployState {
         package_filter: Option<&str>,
         roots: Option<&TargetRoots>,
     ) -> Result<usize> {
+        let entries_before = self.entries.clone();
         let mut restored = 0;
         let mut remaining = Vec::new();
         let mut restore_error: Option<anyhow::Error> = None;
@@ -446,25 +447,24 @@ impl DeployState {
             }
         }
 
-        if package_filter.is_some() {
-            self.entries = remaining;
-            if let Err(save_err) = self.save() {
-                eprintln!("warning: failed to save state after partial restore: {save_err}");
+        self.entries = remaining;
+        if package_filter.is_some() || restore_error.is_some() {
+            match self.save() {
+                Ok(()) => {
+                    let candidates = unreferenced_original_hashes(&entries_before, &self.entries);
+                    self.cleanup_unreferenced_originals(&candidates)?;
+                }
+                Err(save_err) => {
+                    eprintln!("warning: failed to save state after partial restore: {save_err}");
+                }
             }
-        } else if restore_error.is_none() {
-            let originals = self.originals_dir();
-            if originals.is_dir() {
-                let _ = std::fs::remove_dir_all(&originals);
-            }
+        } else {
+            self.save()?;
+            let candidates = unreferenced_original_hashes(&entries_before, &self.entries);
+            self.cleanup_unreferenced_originals(&candidates)?;
             let state_path = self.state_dir.join(STATE_FILE);
             if state_path.exists() {
                 std::fs::remove_file(&state_path)?;
-            }
-        } else {
-            // Save partial progress — remove successfully-restored entries
-            self.entries = remaining;
-            if let Err(save_err) = self.save() {
-                eprintln!("warning: failed to save state after partial restore: {save_err}");
             }
         }
 
@@ -516,6 +516,7 @@ impl DeployState {
             }
         }
 
+        let entries_before = self.entries.clone();
         let mut removed = 0;
         let mut remaining = Vec::new();
 
@@ -536,6 +537,8 @@ impl DeployState {
 
         self.entries = remaining;
         self.save()?;
+        let candidates = unreferenced_original_hashes(&entries_before, &self.entries);
+        self.cleanup_unreferenced_originals(&candidates)?;
 
         // Run post_undeploy hook
         if let Some(pkgs) = packages {
@@ -614,11 +617,14 @@ impl DeployState {
             }
         }
 
-        // Clean up originals directory
-        let originals = self.originals_dir();
-        if originals.is_dir() {
-            let _ = std::fs::remove_dir_all(&originals);
-        }
+        let candidates: HashSet<String> = self
+            .entries
+            .iter()
+            .filter_map(|entry| entry.original_hash.clone())
+            .collect();
+        let empty_state = DeployState::new(&self.state_dir);
+        empty_state.save()?;
+        empty_state.cleanup_unreferenced_originals(&candidates)?;
 
         // Remove the state file itself
         let state_path = self.state_dir.join(STATE_FILE);
@@ -641,6 +647,61 @@ impl DeployState {
 
         Ok(removed)
     }
+
+    /// Removes candidate backup blobs that are no longer referenced by current entries.
+    /// Missing blobs are ignored; deletion errors warn without failing the state transition.
+    pub fn cleanup_unreferenced_originals(&self, candidates: &HashSet<String>) -> Result<()> {
+        let directories = [self.originals_dir(), self.state_dir.join("deployed")];
+        for hash in candidates {
+            if !is_safe_original_blob_name(hash) {
+                eprintln!("warning: skipping invalid original backup name: {hash}");
+                continue;
+            }
+            if self
+                .entries
+                .iter()
+                .any(|entry| entry.original_hash.as_deref() == Some(hash.as_str()))
+            {
+                continue;
+            }
+
+            for directory in &directories {
+                let path = directory.join(hash);
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => eprintln!(
+                        "warning: failed to remove unreferenced original backup {}: {error}",
+                        path.display()
+                    ),
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn is_safe_original_blob_name(name: &str) -> bool {
+    let mut components = Path::new(name).components();
+    matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
+}
+
+/// Finds backup hashes present before a transition but no longer referenced afterward.
+pub fn unreferenced_original_hashes(
+    before: &[DeployEntry],
+    after: &[DeployEntry],
+) -> HashSet<String> {
+    let retained: HashSet<&str> = after
+        .iter()
+        .filter_map(|entry| entry.original_hash.as_deref())
+        .collect();
+    before
+        .iter()
+        .filter_map(|entry| entry.original_hash.as_ref())
+        .filter(|hash| !retained.contains(hash.as_str()))
+        .cloned()
+        .collect()
 }
 
 /// Removes a target without following symlinks or recursively deleting directories.

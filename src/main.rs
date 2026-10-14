@@ -1140,8 +1140,14 @@ fn main() -> anyhow::Result<()> {
                 if pruned_targets.is_empty() {
                     println!("No orphaned files were pruned.");
                 } else {
+                    let entries_before_prune = existing_state.entries().to_vec();
                     existing_state.remove_targets(&pruned_targets);
                     existing_state.save()?;
+                    let candidates = dotm::state::unreferenced_original_hashes(
+                        &entries_before_prune,
+                        existing_state.entries(),
+                    );
+                    existing_state.cleanup_unreferenced_originals(&candidates)?;
                     println!("Pruned {} orphaned files.", pruned_targets.len());
                 }
 

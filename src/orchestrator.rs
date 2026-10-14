@@ -590,12 +590,18 @@ impl Orchestrator {
                 }
             }
 
+            let backup_candidates = crate::state::unreferenced_original_hashes(
+                existing_state.entries(),
+                state.entries(),
+            );
             if deploy_error.is_some() {
-                if let Err(e) = state.save() {
-                    eprintln!("warning: failed to save partial state: {e}");
+                match state.save() {
+                    Ok(()) => state.cleanup_unreferenced_originals(&backup_candidates)?,
+                    Err(error) => eprintln!("warning: failed to save partial state: {error}"),
                 }
             } else {
                 state.save()?;
+                state.cleanup_unreferenced_originals(&backup_candidates)?;
             }
         }
 

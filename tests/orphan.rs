@@ -204,6 +204,105 @@ fn auto_prune_preserves_missing_package_and_prunes_other_orphans() {
 }
 
 #[test]
+fn auto_prune_reclaims_original_backup_after_state_save() {
+    let target = TempDir::new().unwrap();
+    let dotfiles = TempDir::new().unwrap();
+    let state_dir = TempDir::new().unwrap();
+    copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
+    let config_path = dotfiles.path().join("dotm.toml");
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    std::fs::write(
+        &config_path,
+        config.replace(
+            "[dotm]\ntarget = \"~\"",
+            "[dotm]\ntarget = \"~\"\nauto_prune = true",
+        ),
+    )
+    .unwrap();
+    let orphan = target.path().join(".config/nvim/init.lua");
+    std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+    std::fs::write(&orphan, "pre-dotm original").unwrap();
+
+    let mut first_deploy = Orchestrator::new(dotfiles.path(), target.path())
+        .unwrap()
+        .with_state_dir(state_dir.path());
+    first_deploy.deploy("testhost", false, true).unwrap();
+    let first_state = dotm::state::DeployState::load(state_dir.path()).unwrap();
+    let original_hash = first_state
+        .entries()
+        .iter()
+        .find(|entry| entry.target == orphan)
+        .unwrap()
+        .original_hash
+        .clone()
+        .unwrap();
+    let originals = state_dir.path().join("originals").join(&original_hash);
+    let deployed = state_dir.path().join("deployed").join(&original_hash);
+    assert!(originals.exists() || deployed.exists());
+
+    std::fs::write(dotfiles.path().join("roles/dev.toml"), "packages = []\n").unwrap();
+    let mut second_deploy = Orchestrator::new(dotfiles.path(), target.path())
+        .unwrap()
+        .with_state_dir(state_dir.path());
+    let report = second_deploy.deploy("testhost", false, false).unwrap();
+
+    assert!(report.pruned.contains(&orphan));
+    assert!(!originals.exists() && !deployed.exists());
+    let final_state = dotm::state::DeployState::load(state_dir.path()).unwrap();
+    assert!(
+        final_state
+            .entries()
+            .iter()
+            .all(|entry| entry.target != orphan)
+    );
+}
+
+#[test]
+fn deploy_reclaims_backup_for_already_missing_orphan_after_state_save() {
+    let target = TempDir::new().unwrap();
+    let dotfiles = TempDir::new().unwrap();
+    let state_dir = TempDir::new().unwrap();
+    copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
+    let orphan = target.path().join(".config/nvim/init.lua");
+    std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+    std::fs::write(&orphan, "pre-dotm original").unwrap();
+
+    let mut first_deploy = Orchestrator::new(dotfiles.path(), target.path())
+        .unwrap()
+        .with_state_dir(state_dir.path());
+    first_deploy.deploy("testhost", false, true).unwrap();
+    let first_state = dotm::state::DeployState::load(state_dir.path()).unwrap();
+    let original_hash = first_state
+        .entries()
+        .iter()
+        .find(|entry| entry.target == orphan)
+        .unwrap()
+        .original_hash
+        .clone()
+        .unwrap();
+    let originals = state_dir.path().join("originals").join(&original_hash);
+    let deployed = state_dir.path().join("deployed").join(&original_hash);
+    assert!(originals.exists() || deployed.exists());
+
+    std::fs::write(dotfiles.path().join("roles/dev.toml"), "packages = []\n").unwrap();
+    std::fs::remove_file(&orphan).unwrap();
+    let mut second_deploy = Orchestrator::new(dotfiles.path(), target.path())
+        .unwrap()
+        .with_state_dir(state_dir.path());
+    let report = second_deploy.deploy("testhost", false, false).unwrap();
+
+    assert!(report.orphaned.contains(&orphan));
+    assert!(!originals.exists() && !deployed.exists());
+    let final_state = dotm::state::DeployState::load(state_dir.path()).unwrap();
+    assert!(
+        final_state
+            .entries()
+            .iter()
+            .all(|entry| entry.target != orphan)
+    );
+}
+
+#[test]
 fn deploy_detects_orphaned_files() {
     let target = TempDir::new().unwrap();
     let dotfiles = TempDir::new().unwrap();
