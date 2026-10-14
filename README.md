@@ -291,7 +291,9 @@ Warning: 2 orphaned files remain:
 Run 'dotm prune' to clean up.
 ```
 
-Orphaned files that remain on disk stay tracked and visible in `dotm status` until pruned. `dotm deploy --dry-run` and `dotm sync` report the same orphan summary. Already-missing orphan targets are removed from state; if automatic pruning cannot delete a target, dotm warns and keeps it tracked.
+Orphaned files that remain on disk stay tracked and visible in `dotm status` until pruned. `dotm deploy --dry-run` and `dotm sync` report the same orphan summary. Already-missing orphan targets are removed from state. If dotm cannot scan a package's source directory, it preserves that package's previous state instead of treating its targets as orphans.
+
+Pruning is non-recursive: dotm unlinks files and symlinks, and removes directory targets only when they are empty. A non-empty directory or other deletion failure remains tracked. Automatic pruning warns with manual-removal guidance and does not fail the deploy; explicit `dotm prune` saves successful removals, keeps failed targets tracked, and exits non-zero if any deletion fails. Review the warning before manually removing or moving a target, then rerun prune.
 
 To automatically remove orphans on every deploy:
 
@@ -432,7 +434,9 @@ dotm restore --dry-run         # show what would be restored
 dotm restore --system          # restore system files
 ```
 
-`restore` differs from `undeploy`: if dotm overwrote an existing file, `restore` puts the original back. `undeploy` just removes the file.
+`restore` differs from `undeploy`: if dotm overwrote an existing file, `restore` puts the original back. `undeploy` just removes the file. Dotm preserves the pre-first-deploy content and recorded metadata across managed redeploys, so restoring after updates returns the original baseline. Restore replaces the managed target itself rather than following an existing symlink.
+
+When restore, undeploy, or pruning removes a file, dotm removes empty parent directories only within the resolved default or package-specific target root. It never climbs above that root; if the package root cannot be resolved, parent cleanup is skipped.
 
 ### status
 
@@ -503,6 +507,8 @@ dotm prune                     # remove orphaned files
 dotm prune --dry-run           # show what would be pruned
 dotm prune --system            # prune system package orphans
 ```
+
+Prune never recursively deletes a directory. Non-empty directory targets and other failed removals remain in state; the command reports the failures and exits non-zero. Automatic pruning instead warns and lets deploy complete. For targets dotm cannot remove, inspect the path and remove or move it manually before retrying.
 
 ### completions
 
