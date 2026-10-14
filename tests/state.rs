@@ -1,8 +1,8 @@
 use dotm::scanner::EntryKind;
-use dotm::state::{
-    DeployEntry, DeployState, TargetRoots, cleanup_empty_parents, cleanup_empty_parents_within,
-};
-use std::path::{Path, PathBuf};
+#[allow(deprecated)]
+use dotm::state::cleanup_empty_parents;
+use dotm::state::{DeployEntry, DeployState, TargetRoots, cleanup_empty_parents_within};
+use std::path::PathBuf;
 use tempfile::TempDir;
 
 #[test]
@@ -345,6 +345,76 @@ fn undeploy_cleans_empty_target_directories() {
         "empty target parent should be cleaned up"
     );
     assert!(target_dir.path().is_dir(), "target root must remain");
+}
+
+#[test]
+fn undeploy_removes_empty_directory_targets() {
+    let state_dir = TempDir::new().unwrap();
+    let target_root = TempDir::new().unwrap();
+    let target = target_root.path().join("empty-target");
+    std::fs::create_dir(&target).unwrap();
+    let mut state = DeployState::new(state_dir.path());
+    state.record(DeployEntry {
+        target: target.clone(),
+        staged: None,
+        source: PathBuf::from("source"),
+        content_hash: "hash".to_string(),
+        original_hash: None,
+        kind: EntryKind::Base,
+        package: "test".to_string(),
+        owner: None,
+        group: None,
+        mode: None,
+        original_owner: None,
+        original_group: None,
+        original_mode: None,
+    });
+    let roots = TargetRoots {
+        default_root: target_root.path().to_path_buf(),
+        package_roots: Default::default(),
+        unavailable_roots: Default::default(),
+    };
+
+    state
+        .undeploy_with_roots(None, state_dir.path(), &roots)
+        .unwrap();
+
+    assert!(!target.exists());
+    assert!(target_root.path().is_dir());
+}
+
+#[test]
+fn restore_removes_empty_directory_targets() {
+    let state_dir = TempDir::new().unwrap();
+    let target_root = TempDir::new().unwrap();
+    let target = target_root.path().join("empty-target");
+    std::fs::create_dir(&target).unwrap();
+    let mut state = DeployState::new(state_dir.path());
+    state.record(DeployEntry {
+        target: target.clone(),
+        staged: None,
+        source: PathBuf::from("source"),
+        content_hash: "hash".to_string(),
+        original_hash: None,
+        kind: EntryKind::Base,
+        package: "test".to_string(),
+        owner: None,
+        group: None,
+        mode: None,
+        original_owner: None,
+        original_group: None,
+        original_mode: None,
+    });
+    let roots = TargetRoots {
+        default_root: target_root.path().to_path_buf(),
+        package_roots: Default::default(),
+        unavailable_roots: Default::default(),
+    };
+
+    state.restore_with_roots(None, &roots).unwrap();
+
+    assert!(!target.exists());
+    assert!(target_root.path().is_dir());
 }
 
 #[test]

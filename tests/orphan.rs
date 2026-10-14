@@ -134,6 +134,76 @@ fn removed_package_override_skips_parent_cleanup_outside_default_root() {
 }
 
 #[test]
+fn auto_prune_preserves_missing_package_and_prunes_other_orphans() {
+    let target = TempDir::new().unwrap();
+    let dotfiles = TempDir::new().unwrap();
+    let state_dir = TempDir::new().unwrap();
+    copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
+
+    let config_path = dotfiles.path().join("dotm.toml");
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    let config = config
+        .replace(
+            "[dotm]\ntarget = \"~\"",
+            "[dotm]\ntarget = \"~\"\nauto_prune = true",
+        )
+        .replace(
+            "[packages.editor]",
+            "[packages.extra]\ndescription = \"Extra package\"\n\n[packages.editor]",
+        );
+    std::fs::write(config_path, config).unwrap();
+    let extra_source = dotfiles.path().join("packages/extra/extra.conf");
+    std::fs::create_dir_all(extra_source.parent().unwrap()).unwrap();
+    std::fs::write(&extra_source, "extra").unwrap();
+    std::fs::write(
+        dotfiles.path().join("roles/dev.toml"),
+        "packages = [\"editor\", \"extra\"]\n",
+    )
+    .unwrap();
+
+    let mut orch = Orchestrator::new(dotfiles.path(), target.path())
+        .unwrap()
+        .with_state_dir(state_dir.path());
+    orch.deploy("testhost", false, false).unwrap();
+    let editor_target = target.path().join(".config/nvim/init.lua");
+    let extra_target = target.path().join("extra.conf");
+    assert!(editor_target.exists());
+    assert!(extra_target.exists());
+
+    std::fs::remove_dir_all(dotfiles.path().join("packages/editor")).unwrap();
+    std::fs::write(
+        dotfiles.path().join("roles/dev.toml"),
+        "packages = [\"editor\"]\n",
+    )
+    .unwrap();
+    let mut orch = Orchestrator::new(dotfiles.path(), target.path())
+        .unwrap()
+        .with_state_dir(state_dir.path());
+    let report = orch.deploy("testhost", false, false).unwrap();
+
+    assert!(report.orphaned.contains(&extra_target));
+    assert!(!report.orphaned.contains(&editor_target));
+    assert!(report.pruned.contains(&extra_target));
+    assert!(
+        editor_target.is_symlink(),
+        "missing source leaves the target link tracked"
+    );
+    let state = dotm::state::DeployState::load(state_dir.path()).unwrap();
+    assert!(
+        state
+            .entries()
+            .iter()
+            .any(|entry| entry.target == editor_target)
+    );
+    assert!(
+        state
+            .entries()
+            .iter()
+            .all(|entry| entry.target != extra_target)
+    );
+}
+
+#[test]
 fn deploy_detects_orphaned_files() {
     let target = TempDir::new().unwrap();
     let dotfiles = TempDir::new().unwrap();
@@ -270,10 +340,8 @@ fn auto_prune_retains_state_when_target_cannot_be_removed() {
     let report = orch.deploy("testhost", false, false).unwrap();
 
     assert!(report.orphaned.contains(&orphan));
-    assert!(
-        report.pruned.is_empty(),
-        "a target that could not be removed must not be reported as pruned"
-    );
+    assert!(report.pruned.is_empty());
+    assert_eq!(report.prune_failed, vec![orphan.clone()]);
     assert!(orphan.is_dir());
     let state = dotm::state::DeployState::load(state_dir.path()).unwrap();
     assert!(

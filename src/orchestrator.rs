@@ -30,6 +30,7 @@ pub struct DeployReport {
     pub dry_run_actions: Vec<PathBuf>,
     pub orphaned: Vec<PathBuf>,
     pub pruned: Vec<PathBuf>,
+    pub prune_failed: Vec<PathBuf>,
 }
 
 pub fn resolve_target_roots(root: &RootConfig, default_root: &Path) -> Result<TargetRoots> {
@@ -158,6 +159,7 @@ impl Orchestrator {
         // Phase 1: Scan all packages and collect pending actions
         let packages_dir = self.loader.packages_dir();
         let mut pending: Vec<PendingAction> = Vec::new();
+        let mut unavailable_packages = HashSet::new();
 
         for pkg_name in &resolved {
             // Filter packages based on system mode
@@ -175,9 +177,10 @@ impl Orchestrator {
             let pkg_dir = packages_dir.join(pkg_name);
             if !pkg_dir.is_dir() {
                 eprintln!(
-                    "warning: package directory not found: {}",
+                    "warning: package directory not found: {}; cannot determine desired targets, retaining prior state",
                     pkg_dir.display()
                 );
+                unavailable_packages.insert(pkg_name.clone());
                 continue;
             }
 
@@ -507,6 +510,10 @@ impl Orchestrator {
             };
 
             for old_entry in existing_state.entries() {
+                if unavailable_packages.contains(&old_entry.package) {
+                    continue;
+                }
+
                 // When a --package filter is active, packages outside the
                 // filtered set were never candidates for (re)deploy this run,
                 // so their old entries must not be treated as orphaned. When
@@ -522,20 +529,16 @@ impl Orchestrator {
                     report.orphaned.push(old_entry.target.clone());
 
                     if !dry_run && self.loader.root().dotm.auto_prune {
-                        let removed = if old_entry.target.is_symlink() || old_entry.target.exists()
-                        {
-                            match std::fs::remove_file(&old_entry.target) {
-                                Ok(()) => true,
-                                Err(e) => {
-                                    eprintln!(
-                                        "warning: failed to prune orphaned file {}: {e}",
-                                        old_entry.target.display()
-                                    );
-                                    false
-                                }
+                        let removed = match crate::state::remove_target(&old_entry.target) {
+                            Ok(_) => true,
+                            Err(error) => {
+                                eprintln!(
+                                    "warning: failed to prune orphaned file {}: {error}",
+                                    old_entry.target.display()
+                                );
+                                report.prune_failed.push(old_entry.target.clone());
+                                false
                             }
-                        } else {
-                            true
                         };
 
                         if removed {

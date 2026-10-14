@@ -1,6 +1,6 @@
 use clap::{CommandFactory, Parser};
 use dotm::orchestrator::Orchestrator;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -1100,6 +1100,7 @@ fn main() -> anyhow::Result<()> {
                 report.orphaned.iter().collect();
 
             let mut pruned_targets = Vec::new();
+            let mut failed_targets = Vec::new();
             let mut orphan_count = 0;
             for entry in existing_state.entries() {
                 if orphaned_targets.contains(&entry.target) {
@@ -1107,26 +1108,21 @@ fn main() -> anyhow::Result<()> {
                     if dry_run {
                         println!("  ? {}", entry.target.display());
                     } else {
-                        let removed = if entry.target.is_symlink() || entry.target.exists() {
-                            match std::fs::remove_file(&entry.target) {
-                                Ok(()) => true,
-                                Err(e) => {
-                                    eprintln!(
-                                        "warning: failed to remove orphaned file {}: {e}",
-                                        entry.target.display()
-                                    );
-                                    false
+                        match dotm::state::remove_target(&entry.target) {
+                            Ok(_) => {
+                                if let Some(root) = target_roots.root_for(&entry.package) {
+                                    dotm::state::cleanup_empty_parents_within(&entry.target, root);
                                 }
+                                println!("  - {}", entry.target.display());
+                                pruned_targets.push(entry.target.clone());
                             }
-                        } else {
-                            true
-                        };
-                        if removed {
-                            if let Some(root) = target_roots.root_for(&entry.package) {
-                                dotm::state::cleanup_empty_parents_within(&entry.target, root);
+                            Err(error) => {
+                                eprintln!(
+                                    "warning: failed to remove orphaned target {}: {error}",
+                                    entry.target.display()
+                                );
+                                failed_targets.push(entry.target.clone());
                             }
-                            println!("  - {}", entry.target.display());
-                            pruned_targets.push(entry.target.clone());
                         }
                     }
                 }
@@ -1147,6 +1143,26 @@ fn main() -> anyhow::Result<()> {
                     existing_state.remove_targets(&pruned_targets);
                     existing_state.save()?;
                     println!("Pruned {} orphaned files.", pruned_targets.len());
+                }
+
+                if !failed_targets.is_empty() {
+                    eprintln!(
+                        "Warning: {} orphaned files could not be removed:",
+                        failed_targets.len()
+                    );
+                    for path in &failed_targets {
+                        eprintln!("  ! {}", path.display());
+                    }
+                    let instruction = if failed_targets.len() == 1 {
+                        "Remove this path manually"
+                    } else {
+                        "Remove these paths manually"
+                    };
+                    eprintln!("{instruction}; dotm will not recursively delete directories.");
+                    anyhow::bail!(
+                        "failed to remove {} orphaned target(s)",
+                        failed_targets.len()
+                    );
                 }
             } else {
                 println!("No orphaned files to prune.");
@@ -1267,10 +1283,26 @@ fn print_orphan_report(report: &dotm::orchestrator::DeployReport) {
     }
 
     let pruned_targets: std::collections::HashSet<&PathBuf> = report.pruned.iter().collect();
+    let failed_targets: std::collections::HashSet<&PathBuf> = report.prune_failed.iter().collect();
+    if !report.prune_failed.is_empty() {
+        eprintln!(
+            "Warning: {} orphaned files remain because removal failed:",
+            report.prune_failed.len()
+        );
+        for path in &report.prune_failed {
+            eprintln!("  ! {}", path.display());
+        }
+        eprintln!("Remove these paths manually; dotm will not recursively delete directories.");
+    }
+
     let remaining_orphans: Vec<&PathBuf> = report
         .orphaned
         .iter()
-        .filter(|path| !pruned_targets.contains(path) && (path.exists() || path.is_symlink()))
+        .filter(|path| {
+            !pruned_targets.contains(path)
+                && !failed_targets.contains(path)
+                && (path.exists() || path.is_symlink())
+        })
         .collect();
     if !remaining_orphans.is_empty() {
         eprintln!(
@@ -1327,6 +1359,23 @@ mod tests {
 
         current.update_entry_hash(0, "changed".to_string());
         assert!(!state_entries_unchanged(before.entries(), current.entries()).unwrap());
+
+        let mut added = DeployState::new(Path::new("unused"));
+        added.record(entry("/target"));
+        added.record(entry("/other"));
+        assert!(!state_entries_unchanged(before.entries(), added.entries()).unwrap());
+
+        let mut removed = DeployState::new(Path::new("unused"));
+        removed.record(entry("/other"));
+        assert!(!state_entries_unchanged(before.entries(), removed.entries()).unwrap());
+
+        let mut ordered = DeployState::new(Path::new("unused"));
+        ordered.record(entry("/target"));
+        ordered.record(entry("/other"));
+        let mut reordered = DeployState::new(Path::new("unused"));
+        reordered.record(entry("/other"));
+        reordered.record(entry("/target"));
+        assert!(!state_entries_unchanged(ordered.entries(), reordered.entries()).unwrap());
     }
 }
 

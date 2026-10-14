@@ -318,7 +318,8 @@ fn cli_auto_prune_reports_partial_failure() {
         .stdout(predicate::str::contains("Pruned 1 orphaned files"))
         .stderr(predicate::str::contains("failed to prune orphaned file"))
         .stderr(predicate::str::contains("orphaned files remain"))
-        .stderr(predicate::str::contains("Run 'dotm prune'"));
+        .stderr(predicate::str::contains("Remove these paths manually"))
+        .stderr(predicate::str::contains("Run 'dotm prune'").not());
     assert!(failed_orphan.is_dir());
 
     isolated_dotm_command(dotfiles.path(), home.path())
@@ -353,9 +354,10 @@ fn cli_prune_keeps_state_when_deletion_fails() {
     isolated_dotm_command(dotfiles.path(), home.path())
         .args(["prune", "--host", "testhost"])
         .assert()
-        .success()
+        .failure()
         .stdout(predicate::str::contains("No orphaned files were pruned"))
-        .stderr(predicate::str::contains("failed to remove orphaned file"));
+        .stderr(predicate::str::contains("failed to remove orphaned target"))
+        .stderr(predicate::str::contains("Remove this path manually"));
     assert!(orphan.is_dir());
 
     isolated_dotm_command(dotfiles.path(), home.path())
@@ -363,6 +365,74 @@ fn cli_prune_keeps_state_when_deletion_fails() {
         .assert()
         .success()
         .stdout(predicate::str::contains("would prune 1 orphaned files"));
+}
+
+#[test]
+fn cli_prune_saves_successful_removals_before_reporting_failure() {
+    let dotfiles = TempDir::new().unwrap();
+    let home = TempDir::new().unwrap();
+    copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
+    let extra_source = dotfiles
+        .path()
+        .join("packages/editor/.config/nvim/extra.conf");
+    std::fs::write(&extra_source, "extra").unwrap();
+
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["deploy", "--host", "testhost"])
+        .assert()
+        .success();
+    std::fs::write(dotfiles.path().join("roles/dev.toml"), "packages = []\n").unwrap();
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["deploy", "--host", "testhost"])
+        .assert()
+        .success();
+
+    let failed_orphan = home.path().join(".config/nvim/init.lua");
+    let successful_orphan = home.path().join(".config/nvim/extra.conf");
+    std::fs::remove_file(&failed_orphan).unwrap();
+    std::fs::create_dir(&failed_orphan).unwrap();
+    std::fs::write(failed_orphan.join("blocker"), "keep directory non-empty").unwrap();
+
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["prune", "--host", "testhost"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("Pruned 1 orphaned files"))
+        .stderr(predicate::str::contains("failed to remove orphaned target"))
+        .stderr(predicate::str::contains("Remove this path manually"));
+
+    assert!(failed_orphan.is_dir());
+    assert!(!successful_orphan.exists());
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["prune", "--host", "testhost", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("would prune 1 orphaned files"));
+}
+
+#[test]
+fn cli_prune_preserves_targets_when_package_source_is_missing() {
+    let dotfiles = TempDir::new().unwrap();
+    let home = TempDir::new().unwrap();
+    copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
+
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["deploy", "--host", "testhost"])
+        .assert()
+        .success();
+    let target = home.path().join(".config/nvim/init.lua");
+    std::fs::remove_dir_all(dotfiles.path().join("packages/editor")).unwrap();
+
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["prune", "--host", "testhost"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No orphaned files to prune"))
+        .stderr(predicate::str::contains("cannot determine desired targets"));
+
+    assert!(target.is_symlink(), "prune must preserve the target link");
+    let state = dotm::state::DeployState::load(&home.path().join(".dotm")).unwrap();
+    assert!(state.entries().iter().any(|entry| entry.target == target));
 }
 
 #[test]

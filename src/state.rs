@@ -409,7 +409,7 @@ impl DeployState {
                             crate::deployer::apply_permission_override(&entry.target, orig_mode);
                     }
                 } else if entry.target.exists() || entry.target.is_symlink() {
-                    std::fs::remove_file(&entry.target)
+                    remove_target(&entry.target)
                         .with_context(|| format!("failed to remove: {}", entry.target.display()))?;
                     if let Some(root) = roots.and_then(|roots| roots.root_for(&entry.package)) {
                         cleanup_empty_parents_within(&entry.target, root);
@@ -502,10 +502,9 @@ impl DeployState {
 
         for entry in &self.entries {
             if entry.package == package {
-                if entry.target.is_symlink() || entry.target.exists() {
-                    std::fs::remove_file(&entry.target).with_context(|| {
-                        format!("failed to remove target: {}", entry.target.display())
-                    })?;
+                if remove_target(&entry.target).with_context(|| {
+                    format!("failed to remove target: {}", entry.target.display())
+                })? {
                     if let Some(root) = roots.and_then(|roots| roots.root_for(&entry.package)) {
                         cleanup_empty_parents_within(&entry.target, root);
                     }
@@ -586,10 +585,9 @@ impl DeployState {
         let mut removed = 0;
 
         for entry in &self.entries {
-            if entry.target.is_symlink() || entry.target.exists() {
-                std::fs::remove_file(&entry.target).with_context(|| {
-                    format!("failed to remove target: {}", entry.target.display())
-                })?;
+            if remove_target(&entry.target)
+                .with_context(|| format!("failed to remove target: {}", entry.target.display()))?
+            {
                 if let Some(root) = roots.and_then(|roots| roots.root_for(&entry.package)) {
                     cleanup_empty_parents_within(&entry.target, root);
                 }
@@ -623,6 +621,37 @@ impl DeployState {
         }
 
         Ok(removed)
+    }
+}
+
+/// Removes a target without following symlinks or recursively deleting directories.
+/// Returns `false` when the target was already absent.
+pub fn remove_target(path: &Path) -> std::io::Result<bool> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+
+    let file_type = metadata.file_type();
+    let removal = if file_type.is_symlink() {
+        let target_is_directory =
+            cfg!(windows) && std::fs::metadata(path).is_ok_and(|target| target.is_dir());
+        if target_is_directory {
+            std::fs::remove_dir(path)
+        } else {
+            std::fs::remove_file(path)
+        }
+    } else if metadata.is_dir() {
+        std::fs::remove_dir(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+
+    match removal {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
     }
 }
 
@@ -711,6 +740,58 @@ mod tests {
             std::fs::read_to_string(deployed.join("hash1")).unwrap(),
             "existing"
         );
+    }
+
+    #[test]
+    fn remove_target_removes_regular_files_and_reports_missing_paths() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("target");
+        std::fs::write(&file, "content").unwrap();
+
+        assert!(remove_target(&file).unwrap());
+        assert!(!file.exists());
+        assert!(!remove_target(&file).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_target_unlinks_symlink_to_directory_without_following_it() {
+        let dir = TempDir::new().unwrap();
+        let real_dir = dir.path().join("real");
+        std::fs::create_dir(&real_dir).unwrap();
+        let marker = real_dir.join("keep");
+        std::fs::write(&marker, "content").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
+
+        assert!(remove_target(&link).unwrap());
+
+        assert!(!link.exists());
+        assert!(real_dir.is_dir());
+        assert!(marker.exists());
+    }
+
+    #[test]
+    fn remove_target_removes_empty_directories() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("empty");
+        std::fs::create_dir(&target).unwrap();
+
+        assert!(remove_target(&target).unwrap());
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn remove_target_rejects_non_empty_directories() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("non-empty");
+        std::fs::create_dir(&target).unwrap();
+        let marker = target.join("keep");
+        std::fs::write(&marker, "content").unwrap();
+
+        assert!(remove_target(&target).is_err());
+        assert!(target.is_dir());
+        assert!(marker.exists());
     }
 
     #[test]
