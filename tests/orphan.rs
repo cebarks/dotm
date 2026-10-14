@@ -1,5 +1,6 @@
+use dotm::config::RootConfig;
 use dotm::orchestrator::Orchestrator;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 fn copy_dir_recursive(src: &Path, dst: &Path) {
@@ -17,6 +18,119 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
             std::fs::copy(&src_path, &dst_path).unwrap();
         }
     }
+}
+
+#[test]
+fn resolved_target_roots_use_injected_default_and_package_override() {
+    let package_target = TempDir::new().unwrap();
+    let config = format!(
+        "[dotm]\ntarget = \"~\"\n[packages.shell]\ntarget = \"{}\"\n",
+        package_target.path().display()
+    );
+    let root: RootConfig = toml::from_str(&config).unwrap();
+    let default_root = PathBuf::from("/injected/default-target");
+
+    let roots = dotm::orchestrator::resolve_target_roots(&root, &default_root).unwrap();
+
+    assert_eq!(roots.root_for("shell"), Some(package_target.path()));
+    assert_eq!(roots.root_for("unconfigured"), Some(default_root.as_path()));
+}
+
+#[test]
+fn auto_prune_keeps_package_target_root() {
+    let target = TempDir::new().unwrap();
+    let editor_root_parent = TempDir::new().unwrap();
+    let editor_root = editor_root_parent.path().join("editor-target");
+    let dotfiles = TempDir::new().unwrap();
+    let state_dir = TempDir::new().unwrap();
+    copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
+
+    let config = std::fs::read_to_string(dotfiles.path().join("dotm.toml")).unwrap();
+    let config = config
+        .replace(
+            "[dotm]\ntarget = \"~\"",
+            "[dotm]\ntarget = \"~\"\nauto_prune = true",
+        )
+        .replace(
+            "suggests = [\"theme\"]",
+            &format!(
+                "suggests = [\"theme\"]\ntarget = \"{}\"",
+                editor_root.display()
+            ),
+        );
+    std::fs::write(dotfiles.path().join("dotm.toml"), config).unwrap();
+
+    let mut orch = Orchestrator::new(dotfiles.path(), target.path())
+        .unwrap()
+        .with_state_dir(state_dir.path());
+    orch.deploy("testhost", false, false).unwrap();
+    let orphan = editor_root.join(".config/nvim/init.lua");
+    assert!(orphan.exists());
+
+    std::fs::write(dotfiles.path().join("roles/dev.toml"), "packages = []\n").unwrap();
+    let mut orch = Orchestrator::new(dotfiles.path(), target.path())
+        .unwrap()
+        .with_state_dir(state_dir.path());
+    let report = orch.deploy("testhost", false, false).unwrap();
+
+    assert!(report.pruned.contains(&orphan));
+    assert!(!orphan.exists());
+    assert!(
+        editor_root.is_dir(),
+        "configured package target root must remain"
+    );
+}
+
+#[test]
+fn removed_package_override_skips_parent_cleanup_outside_default_root() {
+    let target = TempDir::new().unwrap();
+    let editor_root_parent = TempDir::new().unwrap();
+    let editor_root = editor_root_parent.path().join("editor-target");
+    let dotfiles = TempDir::new().unwrap();
+    let state_dir = TempDir::new().unwrap();
+    copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
+
+    let config_path = dotfiles.path().join("dotm.toml");
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    let config = config
+        .replace(
+            "[dotm]\ntarget = \"~\"",
+            "[dotm]\ntarget = \"~\"\nauto_prune = true",
+        )
+        .replace(
+            "suggests = [\"theme\"]",
+            &format!(
+                "suggests = [\"theme\"]\ntarget = \"{}\"",
+                editor_root.display()
+            ),
+        );
+    std::fs::write(&config_path, config).unwrap();
+
+    let mut orch = Orchestrator::new(dotfiles.path(), target.path())
+        .unwrap()
+        .with_state_dir(state_dir.path());
+    orch.deploy("testhost", false, false).unwrap();
+    let orphan = editor_root.join(".config/nvim/init.lua");
+    assert!(orphan.exists());
+
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    std::fs::write(
+        &config_path,
+        config.replace(&format!("target = \"{}\"\n", editor_root.display()), ""),
+    )
+    .unwrap();
+    std::fs::write(dotfiles.path().join("roles/dev.toml"), "packages = []\n").unwrap();
+    let mut orch = Orchestrator::new(dotfiles.path(), target.path())
+        .unwrap()
+        .with_state_dir(state_dir.path());
+    let report = orch.deploy("testhost", false, false).unwrap();
+
+    assert!(report.pruned.contains(&orphan));
+    assert!(!orphan.exists());
+    assert!(
+        orphan.parent().unwrap().is_dir(),
+        "unknown external roots are not cleaned"
+    );
 }
 
 #[test]

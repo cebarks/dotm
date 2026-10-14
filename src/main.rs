@@ -1,6 +1,6 @@
 use clap::{CommandFactory, Parser};
 use dotm::orchestrator::Orchestrator;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
@@ -229,6 +229,13 @@ fn resolve_target_dir(config_target: &str) -> anyhow::Result<std::path::PathBuf>
     Ok(std::path::PathBuf::from(expanded))
 }
 
+fn target_roots_from_loader(
+    loader: &dotm::loader::ConfigLoader,
+) -> Option<dotm::state::TargetRoots> {
+    let default_root = resolve_target_dir(&loader.root().dotm.target).ok()?;
+    dotm::orchestrator::resolve_target_roots(loader.root(), &default_root).ok()
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
@@ -344,7 +351,13 @@ fn main() -> anyhow::Result<()> {
                 }
                 println!("Dry run — would restore {} files.", count);
             } else {
-                let restored = state.restore(package.as_deref())?;
+                let loader = dotm::loader::ConfigLoader::new(&cli.dir).ok();
+                let target_roots = loader.as_ref().and_then(target_roots_from_loader);
+                let restored = if let Some(roots) = target_roots.as_ref() {
+                    state.restore_with_roots(package.as_deref(), roots)?
+                } else {
+                    state.restore(package.as_deref())?
+                };
                 println!("Restored {} files.", restored);
             }
         }
@@ -361,20 +374,23 @@ fn main() -> anyhow::Result<()> {
             };
             let mut state = dotm::state::DeployState::load_locked(&state_dir)?;
 
-            // Load config for undeploy hooks (optional — hooks skipped if config
-            // unavailable, or if --no-hooks was passed)
+            let loader = dotm::loader::ConfigLoader::new(&cli.dir).ok();
+            let target_roots = loader.as_ref().and_then(target_roots_from_loader);
             let packages = if no_hooks {
                 None
             } else {
-                dotm::loader::ConfigLoader::new(&cli.dir)
-                    .ok()
-                    .map(|l| l.root().packages.clone())
+                loader.as_ref().map(|l| l.root().packages.clone())
             };
 
-            let removed = if let Some(ref pkg) = package {
-                state.undeploy_package(pkg, packages.as_ref(), &cli.dir)?
-            } else {
-                state.undeploy(packages.as_ref(), &cli.dir)?
+            let removed = match (package.as_deref(), target_roots.as_ref()) {
+                (Some(pkg), Some(roots)) => {
+                    state.undeploy_package_with_roots(pkg, packages.as_ref(), &cli.dir, roots)?
+                }
+                (Some(pkg), None) => state.undeploy_package(pkg, packages.as_ref(), &cli.dir)?,
+                (None, Some(roots)) => {
+                    state.undeploy_with_roots(packages.as_ref(), &cli.dir, roots)?
+                }
+                (None, None) => state.undeploy(packages.as_ref(), &cli.dir)?,
             };
             println!("Removed {removed} managed files.");
         }
@@ -1058,6 +1074,8 @@ fn main() -> anyhow::Result<()> {
             } else {
                 dotm_state_dir()
             };
+            let target_roots =
+                dotm::orchestrator::resolve_target_roots(loader.root(), &target_dir)?;
 
             let state_before_scan = dotm::state::DeployState::load(&state_dir)?;
             if state_before_scan.entries().is_empty() {
@@ -1104,7 +1122,9 @@ fn main() -> anyhow::Result<()> {
                             true
                         };
                         if removed {
-                            dotm::state::cleanup_empty_parents(&entry.target);
+                            if let Some(root) = target_roots.root_for(&entry.package) {
+                                dotm::state::cleanup_empty_parents_within(&entry.target, root);
+                            }
                             println!("  - {}", entry.target.display());
                             pruned_targets.push(entry.target.clone());
                         }

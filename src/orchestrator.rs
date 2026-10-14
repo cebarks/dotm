@@ -1,10 +1,11 @@
+use crate::config::RootConfig;
 use crate::deployer::{self, DeployResult};
 use crate::hash;
 use crate::loader::ConfigLoader;
 use crate::metadata;
 use crate::resolver;
 use crate::scanner;
-use crate::state::{DeployEntry, DeployState};
+use crate::state::{DeployEntry, DeployState, TargetRoots};
 use crate::template;
 use crate::vars;
 use anyhow::{Context, Result, bail};
@@ -29,6 +30,33 @@ pub struct DeployReport {
     pub dry_run_actions: Vec<PathBuf>,
     pub orphaned: Vec<PathBuf>,
     pub pruned: Vec<PathBuf>,
+}
+
+pub fn resolve_target_roots(root: &RootConfig, default_root: &Path) -> Result<TargetRoots> {
+    let mut package_roots = HashMap::new();
+    let mut unavailable_roots = HashSet::new();
+
+    for (package, config) in &root.packages {
+        if let Some(target) = &config.target {
+            match expand_path(target, Some(&format!("package '{package}'"))) {
+                Ok(target_root) => {
+                    package_roots.insert(package.clone(), PathBuf::from(target_root));
+                }
+                Err(error) => {
+                    eprintln!(
+                        "warning: cannot resolve target root for package '{package}', skipping parent cleanup: {error}"
+                    );
+                    unavailable_roots.insert(package.clone());
+                }
+            }
+        }
+    }
+
+    Ok(TargetRoots {
+        default_root: default_root.to_path_buf(),
+        package_roots,
+        unavailable_roots,
+    })
 }
 
 struct PendingAction {
@@ -472,6 +500,11 @@ impl Orchestrator {
                 .collect();
 
             let resolved_set: HashSet<&str> = resolved.iter().map(|s| s.as_str()).collect();
+            let target_roots = if !dry_run && self.loader.root().dotm.auto_prune {
+                Some(resolve_target_roots(self.loader.root(), &self.target_dir)?)
+            } else {
+                None
+            };
 
             for old_entry in existing_state.entries() {
                 // When a --package filter is active, packages outside the
@@ -506,7 +539,12 @@ impl Orchestrator {
                         };
 
                         if removed {
-                            crate::state::cleanup_empty_parents(&old_entry.target);
+                            if let Some(root) = target_roots
+                                .as_ref()
+                                .and_then(|roots| roots.root_for(&old_entry.package))
+                            {
+                                crate::state::cleanup_empty_parents_within(&old_entry.target, root);
+                            }
                             report.pruned.push(old_entry.target.clone());
                         }
                     }

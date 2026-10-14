@@ -1,6 +1,8 @@
 use dotm::scanner::EntryKind;
-use dotm::state::{DeployEntry, DeployState};
-use std::path::PathBuf;
+use dotm::state::{
+    DeployEntry, DeployState, TargetRoots, cleanup_empty_parents, cleanup_empty_parents_within,
+};
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 #[test]
@@ -329,12 +331,157 @@ fn undeploy_cleans_empty_target_directories() {
     });
     state.save().unwrap();
 
-    state.undeploy(None, state_dir.path()).unwrap();
+    let roots = TargetRoots {
+        default_root: target_dir.path().to_path_buf(),
+        package_roots: Default::default(),
+        unavailable_roots: Default::default(),
+    };
+    state
+        .undeploy_with_roots(None, state_dir.path(), &roots)
+        .unwrap();
     assert!(!target_path.exists());
     assert!(
         !target_parent.exists(),
         "empty target parent should be cleaned up"
     );
+    assert!(target_dir.path().is_dir(), "target root must remain");
+}
+
+#[test]
+fn undeploy_wrapper_skips_parent_cleanup_without_root() {
+    let source_dir = TempDir::new().unwrap();
+    let target_dir = TempDir::new().unwrap();
+    let state_dir = TempDir::new().unwrap();
+    let source_path = source_dir.path().join("file.conf");
+    std::fs::write(&source_path, "content").unwrap();
+    let target_parent = target_dir.path().join(".config/nested");
+    std::fs::create_dir_all(&target_parent).unwrap();
+    let target_path = target_parent.join("file.conf");
+    std::os::unix::fs::symlink(&source_path, &target_path).unwrap();
+
+    let mut state = DeployState::new(state_dir.path());
+    state.record(DeployEntry {
+        target: target_path.clone(),
+        staged: None,
+        source: source_path,
+        content_hash: "hash".to_string(),
+        original_hash: None,
+        kind: EntryKind::Base,
+        package: "test".to_string(),
+        owner: None,
+        group: None,
+        mode: None,
+        original_owner: None,
+        original_group: None,
+        original_mode: None,
+    });
+
+    state.undeploy(None, state_dir.path()).unwrap();
+
+    assert!(!target_path.exists());
+    assert!(target_parent.is_dir());
+}
+
+#[test]
+fn restore_wrapper_skips_parent_cleanup_without_root() {
+    let state_dir = TempDir::new().unwrap();
+    let target_dir = TempDir::new().unwrap();
+    let target_parent = target_dir.path().join(".config/nested");
+    std::fs::create_dir_all(&target_parent).unwrap();
+    let target_path = target_parent.join("file.conf");
+    std::fs::write(&target_path, "managed").unwrap();
+    let mut state = DeployState::new(state_dir.path());
+    state.record(DeployEntry {
+        target: target_path.clone(),
+        staged: None,
+        source: PathBuf::from("source"),
+        content_hash: "hash".to_string(),
+        original_hash: None,
+        kind: EntryKind::Base,
+        package: "test".to_string(),
+        owner: None,
+        group: None,
+        mode: None,
+        original_owner: None,
+        original_group: None,
+        original_mode: None,
+    });
+
+    state.restore(None).unwrap();
+
+    assert!(!target_path.exists());
+    assert!(target_parent.is_dir());
+}
+
+#[test]
+fn cleanup_empty_parents_stops_before_target_root() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("target");
+    let nested = root.join(".config/nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let target = nested.join("file");
+    std::fs::write(&target, "content").unwrap();
+    std::fs::remove_file(&target).unwrap();
+
+    cleanup_empty_parents_within(&target, &root);
+
+    assert!(!nested.exists());
+    assert!(!root.join(".config").exists());
+    assert!(root.is_dir());
+    assert!(parent.path().is_dir());
+}
+
+#[test]
+fn cleanup_empty_parents_skips_paths_outside_target_root() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("target");
+    let outside = parent.path().join("outside/nested");
+    std::fs::create_dir_all(&outside).unwrap();
+    let target = outside.join("file");
+    std::fs::write(&target, "content").unwrap();
+    std::fs::remove_file(&target).unwrap();
+
+    cleanup_empty_parents_within(&target, &root);
+
+    assert!(outside.is_dir());
+    assert!(outside.parent().unwrap().is_dir());
+}
+
+#[test]
+fn cleanup_empty_parents_supports_symlinked_target_root() {
+    let parent = TempDir::new().unwrap();
+    let real_root = parent.path().join("real-target");
+    let root_link = parent.path().join("target-link");
+    std::fs::create_dir_all(&real_root).unwrap();
+    std::os::unix::fs::symlink(&real_root, &root_link).unwrap();
+    let nested = root_link.join(".config/nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let target = nested.join("file");
+    std::fs::write(&target, "content").unwrap();
+    std::fs::remove_file(&target).unwrap();
+
+    cleanup_empty_parents_within(&target, &root_link);
+
+    assert!(!real_root.join(".config").exists());
+    assert!(real_root.is_dir());
+    assert!(root_link.is_symlink());
+}
+
+#[allow(deprecated)]
+#[test]
+fn legacy_cleanup_helper_is_safe_without_a_root() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("target");
+    let nested = root.join(".config/nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let target = nested.join("file");
+    std::fs::write(&target, "content").unwrap();
+    std::fs::remove_file(&target).unwrap();
+
+    cleanup_empty_parents(&target);
+
+    assert!(nested.is_dir());
+    assert!(root.is_dir());
 }
 
 #[test]

@@ -29,6 +29,25 @@ fn isolated_dotm_command(dotfiles: &Path, home: &Path) -> Command {
     command
 }
 
+fn set_editor_target(dotfiles: &Path, target: &Path, auto_prune: bool) {
+    let config_path = dotfiles.join("dotm.toml");
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    let config = if auto_prune {
+        config.replace(
+            "[dotm]\ntarget = \"~\"",
+            "[dotm]\ntarget = \"~\"\nauto_prune = true",
+        )
+    } else {
+        config
+    };
+    let target = format!("{:?}", target.display());
+    let config = config.replace(
+        "suggests = [\"theme\"]",
+        &format!("suggests = [\"theme\"]\ntarget = {target}"),
+    );
+    std::fs::write(config_path, config).unwrap();
+}
+
 fn run_git(directory: &Path, args: &[&str]) {
     let output = std::process::Command::new("git")
         .args(args)
@@ -112,6 +131,82 @@ fn cli_deploy_dry_run() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Dry run"));
+}
+
+#[test]
+fn cli_restore_keeps_package_target_root() {
+    let dotfiles = TempDir::new().unwrap();
+    let home = TempDir::new().unwrap();
+    let package_parent = TempDir::new().unwrap();
+    let package_root = package_parent.path().join("editor-target");
+    copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
+    set_editor_target(dotfiles.path(), &package_root, false);
+
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["deploy", "--host", "testhost"])
+        .assert()
+        .success();
+    let target = package_root.join(".config/nvim/init.lua");
+    assert!(target.exists());
+
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["restore", "--package", "editor"])
+        .assert()
+        .success();
+
+    assert!(!target.exists());
+    assert!(package_root.is_dir());
+}
+
+#[test]
+fn cli_undeploy_keeps_package_target_root() {
+    let dotfiles = TempDir::new().unwrap();
+    let home = TempDir::new().unwrap();
+    let package_parent = TempDir::new().unwrap();
+    let package_root = package_parent.path().join("editor-target");
+    copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
+    set_editor_target(dotfiles.path(), &package_root, false);
+
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["deploy", "--host", "testhost"])
+        .assert()
+        .success();
+    let target = package_root.join(".config/nvim/init.lua");
+    assert!(target.exists());
+
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["undeploy", "--package", "editor", "--no-hooks"])
+        .assert()
+        .success();
+
+    assert!(!target.exists());
+    assert!(package_root.is_dir());
+}
+
+#[test]
+fn cli_prune_keeps_package_target_root() {
+    let dotfiles = TempDir::new().unwrap();
+    let home = TempDir::new().unwrap();
+    let package_parent = TempDir::new().unwrap();
+    let package_root = package_parent.path().join("editor-target");
+    copy_dir_recursive(Path::new("tests/fixtures/basic"), dotfiles.path());
+    set_editor_target(dotfiles.path(), &package_root, false);
+
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["deploy", "--host", "testhost"])
+        .assert()
+        .success();
+    let target = package_root.join(".config/nvim/init.lua");
+    std::fs::write(dotfiles.path().join("roles/dev.toml"), "packages = []\n").unwrap();
+
+    isolated_dotm_command(dotfiles.path(), home.path())
+        .args(["prune", "--host", "testhost"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Pruned 1 orphaned files"));
+
+    assert!(!target.exists());
+    assert!(package_root.is_dir());
 }
 
 #[test]

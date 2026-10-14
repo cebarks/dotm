@@ -3,7 +3,7 @@ use crate::scanner::EntryKind;
 use anyhow::{Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -94,6 +94,27 @@ pub struct DeployEntry {
     pub original_group: Option<String>,
     #[serde(default)]
     pub original_mode: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TargetRoots {
+    pub default_root: PathBuf,
+    pub package_roots: HashMap<String, PathBuf>,
+    pub unavailable_roots: HashSet<String>,
+}
+
+impl TargetRoots {
+    pub fn root_for(&self, package: &str) -> Option<&Path> {
+        if self.unavailable_roots.contains(package) {
+            return None;
+        }
+        Some(
+            self.package_roots
+                .get(package)
+                .map(PathBuf::as_path)
+                .unwrap_or(&self.default_root),
+        )
+    }
 }
 
 impl DeployState {
@@ -335,6 +356,22 @@ impl DeployState {
     /// Files without original_hash (dotm created them) get removed.
     /// Returns the count of restored files.
     pub fn restore(&mut self, package_filter: Option<&str>) -> Result<usize> {
+        self.restore_inner(package_filter, None)
+    }
+
+    pub fn restore_with_roots(
+        &mut self,
+        package_filter: Option<&str>,
+        roots: &TargetRoots,
+    ) -> Result<usize> {
+        self.restore_inner(package_filter, Some(roots))
+    }
+
+    fn restore_inner(
+        &mut self,
+        package_filter: Option<&str>,
+        roots: Option<&TargetRoots>,
+    ) -> Result<usize> {
         let mut restored = 0;
         let mut remaining = Vec::new();
         let mut restore_error: Option<anyhow::Error> = None;
@@ -374,7 +411,9 @@ impl DeployState {
                 } else if entry.target.exists() || entry.target.is_symlink() {
                     std::fs::remove_file(&entry.target)
                         .with_context(|| format!("failed to remove: {}", entry.target.display()))?;
-                    cleanup_empty_parents(&entry.target);
+                    if let Some(root) = roots.and_then(|roots| roots.root_for(&entry.package)) {
+                        cleanup_empty_parents_within(&entry.target, root);
+                    }
                 }
                 Ok(())
             })();
@@ -429,6 +468,26 @@ impl DeployState {
         packages: Option<&HashMap<String, crate::config::PackageConfig>>,
         cwd: &Path,
     ) -> Result<usize> {
+        self.undeploy_package_inner(package, packages, cwd, None)
+    }
+
+    pub fn undeploy_package_with_roots(
+        &mut self,
+        package: &str,
+        packages: Option<&HashMap<String, crate::config::PackageConfig>>,
+        cwd: &Path,
+        roots: &TargetRoots,
+    ) -> Result<usize> {
+        self.undeploy_package_inner(package, packages, cwd, Some(roots))
+    }
+
+    fn undeploy_package_inner(
+        &mut self,
+        package: &str,
+        packages: Option<&HashMap<String, crate::config::PackageConfig>>,
+        cwd: &Path,
+        roots: Option<&TargetRoots>,
+    ) -> Result<usize> {
         // Run pre_undeploy hook
         if let Some(pkgs) = packages {
             if let Some(pkg_config) = pkgs.get(package) {
@@ -447,7 +506,9 @@ impl DeployState {
                     std::fs::remove_file(&entry.target).with_context(|| {
                         format!("failed to remove target: {}", entry.target.display())
                     })?;
-                    cleanup_empty_parents(&entry.target);
+                    if let Some(root) = roots.and_then(|roots| roots.root_for(&entry.package)) {
+                        cleanup_empty_parents_within(&entry.target, root);
+                    }
                     removed += 1;
                 }
             } else {
@@ -482,6 +543,24 @@ impl DeployState {
         packages: Option<&HashMap<String, crate::config::PackageConfig>>,
         cwd: &Path,
     ) -> Result<usize> {
+        self.undeploy_inner(packages, cwd, None)
+    }
+
+    pub fn undeploy_with_roots(
+        &self,
+        packages: Option<&HashMap<String, crate::config::PackageConfig>>,
+        cwd: &Path,
+        roots: &TargetRoots,
+    ) -> Result<usize> {
+        self.undeploy_inner(packages, cwd, Some(roots))
+    }
+
+    fn undeploy_inner(
+        &self,
+        packages: Option<&HashMap<String, crate::config::PackageConfig>>,
+        cwd: &Path,
+        roots: Option<&TargetRoots>,
+    ) -> Result<usize> {
         // Collect unique packages (preserving first-seen order). Entries may not
         // be contiguous per-package (e.g. after state merges), so hooks are run
         // in two separate passes rather than tracked during removal.
@@ -511,7 +590,9 @@ impl DeployState {
                 std::fs::remove_file(&entry.target).with_context(|| {
                     format!("failed to remove target: {}", entry.target.display())
                 })?;
-                cleanup_empty_parents(&entry.target);
+                if let Some(root) = roots.and_then(|roots| roots.root_for(&entry.package)) {
+                    cleanup_empty_parents_within(&entry.target, root);
+                }
                 removed += 1;
             }
         }
@@ -545,16 +626,26 @@ impl DeployState {
     }
 }
 
-pub fn cleanup_empty_parents(path: &Path) {
+pub fn cleanup_empty_parents_within(path: &Path, root: &Path) {
+    let Ok(root) = std::fs::canonicalize(root) else {
+        return;
+    };
     let mut current = path.parent();
+
     while let Some(parent) = current {
-        if parent == Path::new("") || parent == Path::new("/") {
+        let Ok(canonical_parent) = std::fs::canonicalize(parent) else {
+            break;
+        };
+        if canonical_parent == root || !canonical_parent.starts_with(&root) {
             break;
         }
+
         match std::fs::read_dir(parent) {
             Ok(mut entries) => {
                 if entries.next().is_none() {
-                    let _ = std::fs::remove_dir(parent);
+                    if std::fs::remove_dir(parent).is_err() {
+                        break;
+                    }
                     current = parent.parent();
                 } else {
                     break;
@@ -564,6 +655,10 @@ pub fn cleanup_empty_parents(path: &Path) {
         }
     }
 }
+
+/// Legacy cleanup entry point without a configured root; it safely does nothing.
+#[deprecated(note = "use cleanup_empty_parents_within with a resolved target root")]
+pub fn cleanup_empty_parents(_path: &Path) {}
 
 #[cfg(test)]
 mod tests {
