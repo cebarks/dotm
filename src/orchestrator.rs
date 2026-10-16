@@ -1,10 +1,11 @@
+use crate::config::RootConfig;
 use crate::deployer::{self, DeployResult};
 use crate::hash;
 use crate::loader::ConfigLoader;
 use crate::metadata;
 use crate::resolver;
 use crate::scanner;
-use crate::state::{DeployEntry, DeployState};
+use crate::state::{DeployEntry, DeployState, TargetRoots};
 use crate::template;
 use crate::vars;
 use anyhow::{Context, Result, bail};
@@ -29,6 +30,34 @@ pub struct DeployReport {
     pub dry_run_actions: Vec<PathBuf>,
     pub orphaned: Vec<PathBuf>,
     pub pruned: Vec<PathBuf>,
+    pub prune_failed: Vec<PathBuf>,
+}
+
+pub fn resolve_target_roots(root: &RootConfig, default_root: &Path) -> Result<TargetRoots> {
+    let mut package_roots = HashMap::new();
+    let mut unavailable_roots = HashSet::new();
+
+    for (package, config) in &root.packages {
+        if let Some(target) = &config.target {
+            match expand_path(target, Some(&format!("package '{package}'"))) {
+                Ok(target_root) => {
+                    package_roots.insert(package.clone(), PathBuf::from(target_root));
+                }
+                Err(error) => {
+                    eprintln!(
+                        "warning: cannot resolve target root for package '{package}', skipping parent cleanup: {error}"
+                    );
+                    unavailable_roots.insert(package.clone());
+                }
+            }
+        }
+    }
+
+    Ok(TargetRoots {
+        default_root: default_root.to_path_buf(),
+        package_roots,
+        unavailable_roots,
+    })
 }
 
 struct PendingAction {
@@ -130,6 +159,7 @@ impl Orchestrator {
         // Phase 1: Scan all packages and collect pending actions
         let packages_dir = self.loader.packages_dir();
         let mut pending: Vec<PendingAction> = Vec::new();
+        let mut unavailable_packages = HashSet::new();
 
         for pkg_name in &resolved {
             // Filter packages based on system mode
@@ -147,9 +177,10 @@ impl Orchestrator {
             let pkg_dir = packages_dir.join(pkg_name);
             if !pkg_dir.is_dir() {
                 eprintln!(
-                    "warning: package directory not found: {}",
+                    "warning: package directory not found: {}; cannot determine desired targets, retaining prior state",
                     pkg_dir.display()
                 );
+                unavailable_packages.insert(pkg_name.clone());
                 continue;
             }
 
@@ -219,6 +250,12 @@ impl Orchestrator {
             .entries()
             .iter()
             .map(|e| e.target.clone())
+            .collect();
+
+        let existing_entries: HashMap<PathBuf, &DeployEntry> = existing_state
+            .entries()
+            .iter()
+            .map(|entry| (entry.target.clone(), entry))
             .collect();
 
         // Phase 4: Deploy each action (with per-package hooks)
@@ -321,12 +358,20 @@ impl Orchestrator {
                     force
                 };
 
-                let is_managed = existing_targets.contains(&target_path);
-
                 // Backup pre-existing file content and metadata before deploying
                 // Skip backup for managed re-deploys (preserve the original pre-dotm content)
                 let (original_hash, original_owner, original_group, original_mode) =
-                    if !dry_run && !is_managed && target_path.exists() && !target_path.is_symlink()
+                    if let Some(previous) = existing_entries.get(&target_path) {
+                        (
+                            previous.original_hash.clone(),
+                            previous.original_owner.clone(),
+                            previous.original_group.clone(),
+                            previous.original_mode.clone(),
+                        )
+                    } else if !dry_run
+                        && target_path.exists()
+                        && !target_path.is_symlink()
+                        && !target_path.is_dir()
                     {
                         let content = std::fs::read(&target_path)?;
                         let hash = hash::hash_content(&content);
@@ -472,8 +517,17 @@ impl Orchestrator {
                 .collect();
 
             let resolved_set: HashSet<&str> = resolved.iter().map(|s| s.as_str()).collect();
+            let target_roots = if !dry_run && self.loader.root().dotm.auto_prune {
+                Some(resolve_target_roots(self.loader.root(), &self.target_dir)?)
+            } else {
+                None
+            };
 
             for old_entry in existing_state.entries() {
+                if unavailable_packages.contains(&old_entry.package) {
+                    continue;
+                }
+
                 // When a --package filter is active, packages outside the
                 // filtered set were never candidates for (re)deploy this run,
                 // so their old entries must not be treated as orphaned. When
@@ -489,11 +543,27 @@ impl Orchestrator {
                     report.orphaned.push(old_entry.target.clone());
 
                     if !dry_run && self.loader.root().dotm.auto_prune {
-                        if old_entry.target.is_symlink() || old_entry.target.exists() {
-                            let _ = std::fs::remove_file(&old_entry.target);
-                            crate::state::cleanup_empty_parents(&old_entry.target);
+                        let removed = match crate::state::remove_target(&old_entry.target) {
+                            Ok(_) => true,
+                            Err(error) => {
+                                eprintln!(
+                                    "warning: failed to prune orphaned file {}: {error}",
+                                    old_entry.target.display()
+                                );
+                                report.prune_failed.push(old_entry.target.clone());
+                                false
+                            }
+                        };
+
+                        if removed {
+                            if let Some(root) = target_roots
+                                .as_ref()
+                                .and_then(|roots| roots.root_for(&old_entry.package))
+                            {
+                                crate::state::cleanup_empty_parents_within(&old_entry.target, root);
+                            }
+                            report.pruned.push(old_entry.target.clone());
                         }
-                        report.pruned.push(old_entry.target.clone());
                     }
                 }
             }
@@ -502,25 +572,36 @@ impl Orchestrator {
         // Phase 5: Save state (including partial state on error, so deployed files are tracked)
         if !dry_run && self.state_dir.is_some() {
             // Merge: keep old entries for targets we didn't deploy this run,
-            // but drop ones Phase 4.5 already flagged as orphaned so pruned
-            // (or prune-eligible) entries don't get resurrected.
+            // except targets already removed or orphaned targets that are gone.
             let deployed_targets: HashSet<PathBuf> =
                 state.entries().iter().map(|e| e.target.clone()).collect();
-            let orphaned_targets: HashSet<&PathBuf> = report.orphaned.iter().collect();
+            let pruned_targets: HashSet<&PathBuf> = report.pruned.iter().collect();
+            let missing_orphan_targets: HashSet<&PathBuf> = report
+                .orphaned
+                .iter()
+                .filter(|target| !target.exists() && !target.is_symlink())
+                .collect();
             for old in existing_state.entries() {
                 if !deployed_targets.contains(&old.target)
-                    && !orphaned_targets.contains(&old.target)
+                    && !pruned_targets.contains(&old.target)
+                    && !missing_orphan_targets.contains(&old.target)
                 {
                     state.record(old.clone());
                 }
             }
 
+            let backup_candidates = crate::state::unreferenced_original_hashes(
+                existing_state.entries(),
+                state.entries(),
+            );
             if deploy_error.is_some() {
-                if let Err(e) = state.save() {
-                    eprintln!("warning: failed to save partial state: {e}");
+                match state.save() {
+                    Ok(()) => state.cleanup_unreferenced_originals(&backup_candidates)?,
+                    Err(error) => eprintln!("warning: failed to save partial state: {error}"),
                 }
             } else {
                 state.save()?;
+                state.cleanup_unreferenced_originals(&backup_candidates)?;
             }
         }
 

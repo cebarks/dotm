@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Bug Fixes
+
+- Keep existing orphaned files tracked and visible in `dotm status` until pruning; preserve prior state when a package source cannot be scanned, discard already-missing orphan entries, and never recursively delete directory targets
+- Make prune failures safe and explicit: automatic pruning warns and continues deploy, while explicit prune saves successful removals, retains failures in state, and exits non-zero
+- Preserve the original content and metadata baseline across managed redeploys; restore safely replaces symlink targets and bounds empty-parent cleanup to the resolved target root
+- Reclaim original backup blobs only after the reduced state is saved and no remaining entry references them; support both current and legacy backup locations
+
 ### Added
 
 - **Setup command**: `dotm setup` runs one-time/occasional imperative package initialization tasks (package manager bundles, OS preference commands, dependency installs), independent from file deployment

@@ -3,7 +3,7 @@ use crate::scanner::EntryKind;
 use anyhow::{Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -94,6 +94,27 @@ pub struct DeployEntry {
     pub original_group: Option<String>,
     #[serde(default)]
     pub original_mode: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TargetRoots {
+    pub default_root: PathBuf,
+    pub package_roots: HashMap<String, PathBuf>,
+    pub unavailable_roots: HashSet<String>,
+}
+
+impl TargetRoots {
+    pub fn root_for(&self, package: &str) -> Option<&Path> {
+        if self.unavailable_roots.contains(package) {
+            return None;
+        }
+        Some(
+            self.package_roots
+                .get(package)
+                .map(PathBuf::as_path)
+                .unwrap_or(&self.default_root),
+        )
+    }
 }
 
 impl DeployState {
@@ -316,8 +337,21 @@ impl DeployState {
 
     pub fn load_original(&self, content_hash: &str) -> Result<Vec<u8>> {
         let path = self.originals_dir().join(content_hash);
-        std::fs::read(&path)
-            .with_context(|| format!("failed to load original content: {}", path.display()))
+        match std::fs::read(&path) {
+            Ok(content) => Ok(content),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let legacy = self.state_dir.join("deployed").join(content_hash);
+                std::fs::read(&legacy).with_context(|| {
+                    format!(
+                        "failed to load original content from {} or {}",
+                        path.display(),
+                        legacy.display()
+                    )
+                })
+            }
+            Err(error) => Err(error)
+                .with_context(|| format!("failed to load original content: {}", path.display())),
+        }
     }
 
     pub fn migrate_storage(state_dir: &Path) -> Result<()> {
@@ -335,6 +369,23 @@ impl DeployState {
     /// Files without original_hash (dotm created them) get removed.
     /// Returns the count of restored files.
     pub fn restore(&mut self, package_filter: Option<&str>) -> Result<usize> {
+        self.restore_inner(package_filter, None)
+    }
+
+    pub fn restore_with_roots(
+        &mut self,
+        package_filter: Option<&str>,
+        roots: &TargetRoots,
+    ) -> Result<usize> {
+        self.restore_inner(package_filter, Some(roots))
+    }
+
+    fn restore_inner(
+        &mut self,
+        package_filter: Option<&str>,
+        roots: Option<&TargetRoots>,
+    ) -> Result<usize> {
+        let entries_before = self.entries.clone();
         let mut restored = 0;
         let mut remaining = Vec::new();
         let mut restore_error: Option<anyhow::Error> = None;
@@ -356,6 +407,12 @@ impl DeployState {
             let result: Result<()> = (|| {
                 if let Some(ref orig_hash) = entry.original_hash {
                     let original_content = self.load_original(orig_hash)?;
+                    remove_target(&entry.target).with_context(|| {
+                        format!(
+                            "failed to remove existing target before restore: {}",
+                            entry.target.display()
+                        )
+                    })?;
                     std::fs::write(&entry.target, &original_content).with_context(|| {
                         format!("failed to restore: {}", entry.target.display())
                     })?;
@@ -372,9 +429,11 @@ impl DeployState {
                             crate::deployer::apply_permission_override(&entry.target, orig_mode);
                     }
                 } else if entry.target.exists() || entry.target.is_symlink() {
-                    std::fs::remove_file(&entry.target)
+                    remove_target(&entry.target)
                         .with_context(|| format!("failed to remove: {}", entry.target.display()))?;
-                    cleanup_empty_parents(&entry.target);
+                    if let Some(root) = roots.and_then(|roots| roots.root_for(&entry.package)) {
+                        cleanup_empty_parents_within(&entry.target, root);
+                    }
                 }
                 Ok(())
             })();
@@ -388,25 +447,24 @@ impl DeployState {
             }
         }
 
-        if package_filter.is_some() {
-            self.entries = remaining;
-            if let Err(save_err) = self.save() {
-                eprintln!("warning: failed to save state after partial restore: {save_err}");
+        self.entries = remaining;
+        if package_filter.is_some() || restore_error.is_some() {
+            match self.save() {
+                Ok(()) => {
+                    let candidates = unreferenced_original_hashes(&entries_before, &self.entries);
+                    self.cleanup_unreferenced_originals(&candidates)?;
+                }
+                Err(save_err) => {
+                    eprintln!("warning: failed to save state after partial restore: {save_err}");
+                }
             }
-        } else if restore_error.is_none() {
-            let originals = self.originals_dir();
-            if originals.is_dir() {
-                let _ = std::fs::remove_dir_all(&originals);
-            }
+        } else {
+            self.save()?;
+            let candidates = unreferenced_original_hashes(&entries_before, &self.entries);
+            self.cleanup_unreferenced_originals(&candidates)?;
             let state_path = self.state_dir.join(STATE_FILE);
             if state_path.exists() {
                 std::fs::remove_file(&state_path)?;
-            }
-        } else {
-            // Save partial progress — remove successfully-restored entries
-            self.entries = remaining;
-            if let Err(save_err) = self.save() {
-                eprintln!("warning: failed to save state after partial restore: {save_err}");
             }
         }
 
@@ -429,6 +487,26 @@ impl DeployState {
         packages: Option<&HashMap<String, crate::config::PackageConfig>>,
         cwd: &Path,
     ) -> Result<usize> {
+        self.undeploy_package_inner(package, packages, cwd, None)
+    }
+
+    pub fn undeploy_package_with_roots(
+        &mut self,
+        package: &str,
+        packages: Option<&HashMap<String, crate::config::PackageConfig>>,
+        cwd: &Path,
+        roots: &TargetRoots,
+    ) -> Result<usize> {
+        self.undeploy_package_inner(package, packages, cwd, Some(roots))
+    }
+
+    fn undeploy_package_inner(
+        &mut self,
+        package: &str,
+        packages: Option<&HashMap<String, crate::config::PackageConfig>>,
+        cwd: &Path,
+        roots: Option<&TargetRoots>,
+    ) -> Result<usize> {
         // Run pre_undeploy hook
         if let Some(pkgs) = packages {
             if let Some(pkg_config) = pkgs.get(package) {
@@ -438,16 +516,18 @@ impl DeployState {
             }
         }
 
+        let entries_before = self.entries.clone();
         let mut removed = 0;
         let mut remaining = Vec::new();
 
         for entry in &self.entries {
             if entry.package == package {
-                if entry.target.is_symlink() || entry.target.exists() {
-                    std::fs::remove_file(&entry.target).with_context(|| {
-                        format!("failed to remove target: {}", entry.target.display())
-                    })?;
-                    cleanup_empty_parents(&entry.target);
+                if remove_target(&entry.target).with_context(|| {
+                    format!("failed to remove target: {}", entry.target.display())
+                })? {
+                    if let Some(root) = roots.and_then(|roots| roots.root_for(&entry.package)) {
+                        cleanup_empty_parents_within(&entry.target, root);
+                    }
                     removed += 1;
                 }
             } else {
@@ -457,6 +537,8 @@ impl DeployState {
 
         self.entries = remaining;
         self.save()?;
+        let candidates = unreferenced_original_hashes(&entries_before, &self.entries);
+        self.cleanup_unreferenced_originals(&candidates)?;
 
         // Run post_undeploy hook
         if let Some(pkgs) = packages {
@@ -481,6 +563,24 @@ impl DeployState {
         &self,
         packages: Option<&HashMap<String, crate::config::PackageConfig>>,
         cwd: &Path,
+    ) -> Result<usize> {
+        self.undeploy_inner(packages, cwd, None)
+    }
+
+    pub fn undeploy_with_roots(
+        &self,
+        packages: Option<&HashMap<String, crate::config::PackageConfig>>,
+        cwd: &Path,
+        roots: &TargetRoots,
+    ) -> Result<usize> {
+        self.undeploy_inner(packages, cwd, Some(roots))
+    }
+
+    fn undeploy_inner(
+        &self,
+        packages: Option<&HashMap<String, crate::config::PackageConfig>>,
+        cwd: &Path,
+        roots: Option<&TargetRoots>,
     ) -> Result<usize> {
         // Collect unique packages (preserving first-seen order). Entries may not
         // be contiguous per-package (e.g. after state merges), so hooks are run
@@ -507,20 +607,24 @@ impl DeployState {
         let mut removed = 0;
 
         for entry in &self.entries {
-            if entry.target.is_symlink() || entry.target.exists() {
-                std::fs::remove_file(&entry.target).with_context(|| {
-                    format!("failed to remove target: {}", entry.target.display())
-                })?;
-                cleanup_empty_parents(&entry.target);
+            if remove_target(&entry.target)
+                .with_context(|| format!("failed to remove target: {}", entry.target.display()))?
+            {
+                if let Some(root) = roots.and_then(|roots| roots.root_for(&entry.package)) {
+                    cleanup_empty_parents_within(&entry.target, root);
+                }
                 removed += 1;
             }
         }
 
-        // Clean up originals directory
-        let originals = self.originals_dir();
-        if originals.is_dir() {
-            let _ = std::fs::remove_dir_all(&originals);
-        }
+        let candidates: HashSet<String> = self
+            .entries
+            .iter()
+            .filter_map(|entry| entry.original_hash.clone())
+            .collect();
+        let empty_state = DeployState::new(&self.state_dir);
+        empty_state.save()?;
+        empty_state.cleanup_unreferenced_originals(&candidates)?;
 
         // Remove the state file itself
         let state_path = self.state_dir.join(STATE_FILE);
@@ -543,18 +647,114 @@ impl DeployState {
 
         Ok(removed)
     }
+
+    /// Removes candidate backup blobs that are no longer referenced by current entries.
+    /// Missing blobs are ignored; deletion errors warn without failing the state transition.
+    pub fn cleanup_unreferenced_originals(&self, candidates: &HashSet<String>) -> Result<()> {
+        let directories = [self.originals_dir(), self.state_dir.join("deployed")];
+        for hash in candidates {
+            if !is_safe_original_blob_name(hash) {
+                eprintln!("warning: skipping invalid original backup name: {hash}");
+                continue;
+            }
+            if self
+                .entries
+                .iter()
+                .any(|entry| entry.original_hash.as_deref() == Some(hash.as_str()))
+            {
+                continue;
+            }
+
+            for directory in &directories {
+                let path = directory.join(hash);
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => eprintln!(
+                        "warning: failed to remove unreferenced original backup {}: {error}",
+                        path.display()
+                    ),
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
-pub fn cleanup_empty_parents(path: &Path) {
+fn is_safe_original_blob_name(name: &str) -> bool {
+    let mut components = Path::new(name).components();
+    matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
+}
+
+/// Finds backup hashes present before a transition but no longer referenced afterward.
+pub fn unreferenced_original_hashes(
+    before: &[DeployEntry],
+    after: &[DeployEntry],
+) -> HashSet<String> {
+    let retained: HashSet<&str> = after
+        .iter()
+        .filter_map(|entry| entry.original_hash.as_deref())
+        .collect();
+    before
+        .iter()
+        .filter_map(|entry| entry.original_hash.as_ref())
+        .filter(|hash| !retained.contains(hash.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// Removes a target without following symlinks or recursively deleting directories.
+/// Returns `false` when the target was already absent.
+pub fn remove_target(path: &Path) -> std::io::Result<bool> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+
+    let file_type = metadata.file_type();
+    let removal = if file_type.is_symlink() {
+        let target_is_directory =
+            cfg!(windows) && std::fs::metadata(path).is_ok_and(|target| target.is_dir());
+        if target_is_directory {
+            std::fs::remove_dir(path)
+        } else {
+            std::fs::remove_file(path)
+        }
+    } else if metadata.is_dir() {
+        std::fs::remove_dir(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+
+    match removal {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+pub fn cleanup_empty_parents_within(path: &Path, root: &Path) {
+    let Ok(root) = std::fs::canonicalize(root) else {
+        return;
+    };
     let mut current = path.parent();
+
     while let Some(parent) = current {
-        if parent == Path::new("") || parent == Path::new("/") {
+        let Ok(canonical_parent) = std::fs::canonicalize(parent) else {
+            break;
+        };
+        if canonical_parent == root || !canonical_parent.starts_with(&root) {
             break;
         }
+
         match std::fs::read_dir(parent) {
             Ok(mut entries) => {
                 if entries.next().is_none() {
-                    let _ = std::fs::remove_dir(parent);
+                    if std::fs::remove_dir(parent).is_err() {
+                        break;
+                    }
                     current = parent.parent();
                 } else {
                     break;
@@ -564,6 +764,10 @@ pub fn cleanup_empty_parents(path: &Path) {
         }
     }
 }
+
+/// Legacy cleanup entry point without a configured root; it safely does nothing.
+#[deprecated(note = "use cleanup_empty_parents_within with a resolved target root")]
+pub fn cleanup_empty_parents(_path: &Path) {}
 
 #[cfg(test)]
 mod tests {
@@ -616,6 +820,58 @@ mod tests {
             std::fs::read_to_string(deployed.join("hash1")).unwrap(),
             "existing"
         );
+    }
+
+    #[test]
+    fn remove_target_removes_regular_files_and_reports_missing_paths() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("target");
+        std::fs::write(&file, "content").unwrap();
+
+        assert!(remove_target(&file).unwrap());
+        assert!(!file.exists());
+        assert!(!remove_target(&file).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_target_unlinks_symlink_to_directory_without_following_it() {
+        let dir = TempDir::new().unwrap();
+        let real_dir = dir.path().join("real");
+        std::fs::create_dir(&real_dir).unwrap();
+        let marker = real_dir.join("keep");
+        std::fs::write(&marker, "content").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
+
+        assert!(remove_target(&link).unwrap());
+
+        assert!(!link.exists());
+        assert!(real_dir.is_dir());
+        assert!(marker.exists());
+    }
+
+    #[test]
+    fn remove_target_removes_empty_directories() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("empty");
+        std::fs::create_dir(&target).unwrap();
+
+        assert!(remove_target(&target).unwrap());
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn remove_target_rejects_non_empty_directories() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("non-empty");
+        std::fs::create_dir(&target).unwrap();
+        let marker = target.join("keep");
+        std::fs::write(&marker, "content").unwrap();
+
+        assert!(remove_target(&target).is_err());
+        assert!(target.is_dir());
+        assert!(marker.exists());
     }
 
     #[test]
